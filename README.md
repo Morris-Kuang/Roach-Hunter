@@ -11,27 +11,24 @@ and captures cockroaches using computer vision.
 Camera → Detection → Tracking → Control → Motors
 
 ## System Architecture
+```text
 roach-hunter/
-│
-├── README.md                 
-│
+├── README.md
 ├── docs/
-│   ├── architecture.md       
-│   ├── movement-algorithm.md 
-│   ├── hardware.md           
-│   └── development-log.md   
-│
+│   ├── architecture.md
+│   ├── movement-algorithm.md
+│   ├── hardware.md
+│   └── development-log.md
 ├── src/
 │   ├── vision/
 │   ├── controller/
 │   └── esp32/
-│
 ├── assets/
 │   ├── architecture.png
 │   ├── robot-photo.jpg
 │   └── demo.gif
-│
 └── LICENSE
+```
 
 ## Core Capabilities
 
