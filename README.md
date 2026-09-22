@@ -1,6 +1,6 @@
 # Roach-Hunter
 
-> 🪳 There's a cockroach. Let the robot hunt it. 🪳
+🪳 There's a cockroach. Let the robot hunt it. 🪳
 
 An autonomous robot that detects, tracks, pursues,
 and captures cockroaches using computer vision.
