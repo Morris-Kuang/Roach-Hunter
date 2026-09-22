@@ -5,15 +5,13 @@
 An autonomous robot that detects, tracks, pursues,
 and captures cockroaches using computer vision.
 
-[ DEMO GIF ]
 
 ## How It Works
 
 Camera → Detection → Tracking → Control → Motors
 
 ## System Architecture
-
-[ architecture diagram ]
+(TBD)
 
 ## Core Capabilities
 
