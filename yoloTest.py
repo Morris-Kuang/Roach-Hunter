@@ -26,7 +26,7 @@ MOTOR_SEND_INTERVAL = 0.15
 # ------------------------------------------------------------
 
 # Fake cockroaches are currently detected as "bird"
-TARGET_CLASS = "bird"
+TARGET_CLASS = "cockroach"
 
 
 # ------------------------------------------------------------
@@ -283,7 +283,7 @@ except requests.RequestException as error:
 print()
 print("Loading YOLO...")
 
-model = YOLO("yolo11n.pt")
+model = YOLO("best.pt")
 
 print("YOLO loaded")
 
