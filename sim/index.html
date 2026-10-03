@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roach Hunter HUD</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">ROACH HUNTER <span class="tag">AIOT SIM · 3D</span></div>
+    <div class="statusgroup">
+      <span class="pill" id="sysPill">SYSTEM ONLINE</span>
+      <span class="uptime" id="uptime">UPTIME 00:00:00</span>
+      <button class="btn" id="pauseBtn" type="button">PAUSE</button>
+      <button class="btn" id="resetBtn" type="button">RESET</button>
+    </div>
+  </div>
+
+  <main class="grid">
+    <section class="panel">
+      <div class="panel-head">
+        <span>BEDROOM · TOP-DOWN MAP</span>
+        <span class="badge" id="mapBadge">-- targets tracked</span>
+      </div>
+      <div class="canvas-wrap" id="mapWrap">
+        <canvas class="gl" id="mapGl"></canvas>
+        <canvas class="hud" id="mapHud"></canvas>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <span>ONBOARD CAM · AI VISION</span>
+        <span class="badge rec">REC · ESP32-CAM</span>
+      </div>
+      <div class="canvas-wrap camwrap" id="camWrap">
+        <canvas class="gl" id="camGl"></canvas>
+        <canvas class="hud" id="camHud"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <div class="telemetry">
+    <div class="stats" id="stats">
+      <div class="stat"><span class="lbl">Battery</span><span class="val" id="statBattery">--%</span><span class="bar"><i id="batteryBar" style="width:0%"></i></span></div>
+      <div class="stat"><span class="lbl">Caught</span><span class="val" id="statCaught">0</span></div>
+      <div class="stat"><span class="lbl">Missed / Escaped</span><span class="val" id="statMissed">0</span></div>
+      <div class="stat"><span class="lbl">Active Targets</span><span class="val" id="statTargets">0</span></div>
+      <div class="stat"><span class="lbl">FSM Mode</span><span class="val" id="statMode">SEARCH</span></div>
+      <div class="stat"><span class="lbl">HC-SR04</span><span class="val" id="statUltrasonic">-- cm</span></div>
+      <div class="stat"><span class="lbl">L298N PWM-L</span><span class="val" id="statPwmL">--%</span></div>
+      <div class="stat"><span class="lbl">L298N PWM-R</span><span class="val" id="statPwmR">--%</span></div>
+      <div class="stat"><span class="lbl">Detect Conf.</span><span class="val" id="statConf">--%</span></div>
+      <div class="stat"><span class="lbl">BBox Size</span><span class="val" id="statBbox">--%</span></div>
+      <div class="stat"><span class="lbl">Encoder RPM</span><span class="val" id="statRpm">--</span></div>
+      <div class="stat"><span class="lbl">ESP32 RSSI</span><span class="val" id="statRssi">-- dBm</span></div>
+      <div class="stat"><span class="lbl">Net Latency</span><span class="val" id="statLatency">-- ms</span></div>
+      <div class="stat"><span class="lbl">Vision FPS</span><span class="val" id="statFps">--</span></div>
+    </div>
+    <div class="log-wrap">
+      <div class="log-head">Event Log</div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <footer class="credit">Simulated bedroom · synthetic sensor telemetry · for hackathon demo purposes</footer>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
