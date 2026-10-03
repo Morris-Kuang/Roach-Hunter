@@ -1,15 +1,16 @@
 """
 Fine-tune YOLO11n on the combined cockroach dataset (combined_dataset/):
-our own 89 webcam-specific photos (mhacks.v1i.yolov8/) merged with the
+our own 171 webcam-specific photos (mhacks.v2i.yolov11/) merged with the
 public ESP3902 dataset (899 general web photos of real cockroaches,
-ESP3902.v1i.yolov11/) via symlinks -- see combined_dataset/data.yaml.
+ESP3902.v1i.yolov11/) via symlinks -- see build_combined_dataset.sh.
 The web photos teach general roach appearance/robustness; our own photos
-anchor the detector to the actual demo camera/lighting/prop.
+anchor the detector to the actual demo camera/lighting/prop, so each of
+our train images is repeated (OURS_REPEAT, default 2x) to give ESP3902
+samples a smaller per-image weight.
 
 Augmentation is still pushed above ultralytics' defaults (this is still
-well under 1000 images), though less critical now than with the original
-89-image set. close_mosaic disables mosaic for the final epochs so the
-model sees "clean" images before convergence.
+only ~1000 images). close_mosaic disables mosaic for the final epochs so
+the model sees "clean" images before convergence.
 """
 
 import torch
@@ -30,9 +31,9 @@ model.train(
     device=DEVICE,
     batch=16,
     project="runs",
-    name="roach_combined",
+    name="roach_v2_weighted",
 
-    # --- augmentation (tuned up for an 89-image dataset) ---
+    # --- augmentation (tuned up for a small, ~1000-image dataset) ---
     hsv_h=0.02,
     hsv_s=0.8,
     hsv_v=0.5,
@@ -48,6 +49,10 @@ model.train(
     close_mosaic=20,
 )
 
-# Evaluate on the held-out test split (not used during training/validation)
-metrics = model.val(data=DATA, split="test")
-print(metrics.box.map, metrics.box.map50)
+# Evaluate on the held-out test split (not used during training/validation),
+# overall and per source -- "ours" is what matters for the demo camera
+for name, data in [("all", DATA),
+                   ("ours", "combined_dataset/test_ours.yaml"),
+                   ("esp", "combined_dataset/test_esp.yaml")]:
+    metrics = model.val(data=data, split="test", device=DEVICE)
+    print(f"test[{name}] mAP50-95={metrics.box.map:.3f} mAP50={metrics.box.map50:.3f}")
