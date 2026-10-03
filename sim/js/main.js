@@ -44,6 +44,38 @@ function boot() {
     effectPool.push({ mesh: splat, t: 0 });
   }
 
+  // Swatter-paddle "mask" that drops straight down onto the locked target's
+  // last-known spot for the duration of the CAPTURE hold, visually covering
+  // it (success or miss alike -- a real swat always covers the target during
+  // the attempt, it just doesn't always land clean). Fades away once the
+  // state machine resolves the attempt.
+  const COVER_DROP_Y = 0.32, COVER_LAND_Y = 0.018, COVER_FADE_TIME = 0.4;
+  let coverMesh = null, coverFadeT = 0;
+  function spawnCover(x, z) {
+    if (coverMesh) { room.remove(coverMesh); coverMesh.geometry.dispose(); coverMesh.material.dispose(); }
+    coverMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.13, 0.012, 0.11),
+      new THREE.MeshStandardMaterial({ color: 0xdedede, roughness: 0.55, metalness: 0.15, transparent: true, opacity: 1 })
+    );
+    coverMesh.position.set(x, COVER_DROP_Y, z);
+    coverMesh.castShadow = true;
+    coverFadeT = 0;
+    room.add(coverMesh);
+  }
+  function updateCover(dt) {
+    if (!coverMesh) return;
+    if (fsm.mode === 'CAPTURE') {
+      const p = strikeProgress();
+      coverMesh.position.y = COVER_DROP_Y + (COVER_LAND_Y - COVER_DROP_Y) * p;
+    } else {
+      coverFadeT += dt;
+      coverMesh.material.opacity = clamp(1 - coverFadeT / COVER_FADE_TIME, 0, 1);
+      if (coverFadeT >= COVER_FADE_TIME) {
+        room.remove(coverMesh); coverMesh.geometry.dispose(); coverMesh.material.dispose(); coverMesh = null;
+      }
+    }
+  }
+
   // ---- renderers / cameras ----
   const mapGl = document.getElementById('mapGl'), mapHud = document.getElementById('mapHud');
   const camGl = document.getElementById('camGl'), camHud = document.getElementById('camHud');
@@ -88,7 +120,11 @@ function boot() {
     if (tag === 'SAFETY') { telemetry.log('HC-SR04 < 10cm · SAFETY STOP', 'warn', state.simTime); return; }
     if (to === 'TRACK') telemetry.log('TARGET ACQUIRED #' + targetId + ' · turning to center', '', state.simTime);
     else if (to === 'APPROACH') telemetry.log('TARGET CENTERED · approaching #' + targetId, '', state.simTime);
-    else if (to === 'CAPTURE') telemetry.log('CAPTURE RANGE #' + targetId + ' · gripper cycle', 'catch', state.simTime);
+    else if (to === 'CAPTURE') {
+      telemetry.log('CAPTURE RANGE #' + targetId + ' · gripper cycle', 'catch', state.simTime);
+      const victim = state.roaches.find((r) => r.id === targetId);
+      if (victim) spawnCover(victim.x, victim.z);
+    }
     else if (to === 'RECOVER') telemetry.log('TARGET LOST · recovering', 'warn', state.simTime);
     else if (to === 'SEARCH' && from === 'RECOVER') telemetry.log('RECOVERY TIMEOUT · resuming scan', 'warn', state.simTime);
   });
@@ -162,6 +198,7 @@ function boot() {
       if (effectPool[i].t > 1.6) { room.remove(effectPool[i].mesh); effectPool[i].mesh.geometry.dispose(); effectPool[i].mesh.material.dispose(); effectPool.splice(i, 1); }
     }
     updateSwatterAndCamera(dt);
+    updateCover(dt);
 
     mapRenderer.render(scene, mapCamera);
     camRenderer.render(scene, camCamera);
@@ -200,7 +237,12 @@ function boot() {
     // Roach behavior (independent of the robot's algorithm).
     s.roaches.forEach((r) => {
       const event = r.update(dt, s.simTime, rb);
-      if (!event || r.id !== fsm.lockedId) return;
+      if (!event) return;
+      // Counts every roach that got away, not just the one currently locked
+      // (the Missed/Escaped/Lost stat tile is a hunt-wide tally).
+      if (event === 'escaped') rb.escaped = (rb.escaped || 0) + 1;
+      else if (event === 'retreated') rb.lost = (rb.lost || 0) + 1;
+      if (r.id !== fsm.lockedId) return;
       if (event === 'startled') telemetry.log('TARGET #' + r.id + ' STARTLED · bolting for ' + r.fleeTarget.name, 'warn', s.simTime);
       else if (event === 'escaped') telemetry.log('TARGET #' + r.id + ' ESCAPED · lost near ' + r.fleeTarget.name, 'warn', s.simTime);
       else if (event === 'retreated') telemetry.log('TARGET #' + r.id + ' LOST · slipped back into hiding', 'warn', s.simTime);
@@ -233,7 +275,15 @@ function boot() {
     if (command.captured) {
       const target = s.roaches.find((r) => detection && r.id === detection.id);
       const victim = target || s.roaches.reduce((a, b) => (dist(rb.x, rb.z, b.x, b.z) < dist(rb.x, rb.z, a.x, a.z) ? b : a));
-      if (victim && victim.alive) attemptCapture(victim, s, rb);
+      if (victim && victim.alive) {
+        attemptCapture(victim, s, rb);
+      } else {
+        // Gripper cycled on empty air -- the target slipped away mid-hold.
+        // Still a failed attempt, so it still counts as a miss.
+        rb.missed = (rb.missed || 0) + 1;
+        state.captureFx = { result: 'fail', startTime: s.simTime };
+        telemetry.log('CAPTURE ATTEMPT MISSED · target already gone', 'warn', s.simTime);
+      }
     }
 
     // Physical contact fallback: a roach that wanders into the chassis from

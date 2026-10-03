@@ -62,7 +62,7 @@ export function bindTelemetry() {
     els.batteryBar.style.width = clamp(rb.battery, 0, 100) + '%';
     els.batteryBar.style.background = rb.battery < 18 ? 'var(--danger)' : rb.battery < 40 ? 'var(--amber)' : 'var(--accent)';
     els.caught.textContent = rb.caught;
-    els.missed.textContent = rb.missed || 0;
+    els.missed.textContent = (rb.missed || 0) + (rb.escaped || 0) + (rb.lost || 0);
     els.targets.textContent = activeTargets;
     els.mode.textContent = state.mode;
     els.mode.className = 'val' + (state.mode === 'RECOVER' ? ' warn' : state.mode === 'CAPTURE' ? ' crit' : '');

@@ -1,7 +1,8 @@
 // Canvas HUD overlays drawn on top of each WebGL panel: target boxes,
 // crosshair, scanline sweep, and corner readouts.
 
-import { projectToScreen } from './utils.js';
+import { projectToScreen, segmentBlocked } from './utils.js';
+import { OBSTACLES } from './constants.js';
 
 export function drawMapHud(ctx, hud, dims, camera, state) {
   const w = hud.width, h = hud.height, dpr = dims.dpr || 1;
@@ -45,6 +46,10 @@ export function drawCamHud(ctx, hud, dims, camera, state, detection) {
   const visible = [];
   state.roaches.forEach((r) => {
     if (!r.alive) return;
+    // Same no-X-ray rule as the actual detector (vision.js) -- the onboard
+    // feed can't show a box around something it's physically blocked from
+    // seeing, even if it's within the frustum.
+    if (segmentBlocked(camera.position.x, camera.position.z, r.x, r.z, OBSTACLES)) return;
     const p = projectToScreen(camera, new THREE.Vector3(r.x, 0.07, r.z), w, h, 1.05);
     if (!p) return;
     visible.push({ r, p });

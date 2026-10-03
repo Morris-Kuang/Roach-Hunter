@@ -11,7 +11,8 @@ import {
   ALERT_RADIUS, ALERT_BASE_RATE,
   FORAGE_SPEED_MIN, FORAGE_SPEED_MAX, FLEE_SPEED_MIN, FLEE_SPEED_MAX,
   FORAGE_DURATION_MIN, FORAGE_DURATION_MAX,
-  HIDDEN_INTERVAL_MIN, HIDDEN_INTERVAL_MAX, HIDEOUT_RADIUS, SQUASH_DURATION
+  HIDDEN_INTERVAL_MIN, HIDDEN_INTERVAL_MAX, HIDEOUT_RADIUS, SQUASH_DURATION,
+  DUCK_DURATION
 } from '../constants.js';
 
 // A real cockroach is small: roughly 10cm nose-to-tail, 4cm wide, 2cm tall --
@@ -105,6 +106,14 @@ export class Roach {
     this.squashTimer = SQUASH_DURATION;
   }
 
+  /** Starts the shrink-into-cover animation once it reaches a hideout spot. */
+  _startDuck() {
+    this.state = 'ducking';
+    this.alive = false; // no longer a valid target the instant it reaches cover
+    this.speed = 0;
+    this.duckTimer = DUCK_DURATION;
+  }
+
   /** Startles this roach into fleeing toward the nearest hideout, right now. */
   startle() {
     this.state = 'fleeing';
@@ -130,6 +139,24 @@ export class Roach {
       this.mesh.scale.set(1 + p * 0.7, Math.max(0.06, 1 - p * 0.92), 1 + p * 0.7);
       if (this.squashTimer <= 0) {
         this.mesh.scale.set(1, 1, 1);
+        this._hide();
+      }
+      return null;
+    }
+
+    if (this.state === 'ducking') {
+      // Shrinks and sinks in place -- reads as "squeezing into a gap",
+      // not a teleport-style pop. Position/rotation stay put; only scale
+      // and height change, so it's still visible mid-shrink if you're
+      // looking right at it.
+      this.duckTimer -= dt;
+      const p = 1 - clamp(this.duckTimer / DUCK_DURATION, 0, 1);
+      const s = Math.max(0.02, 1 - p);
+      this.mesh.scale.set(s, s, s);
+      this.mesh.position.y = -p * 0.02;
+      if (this.duckTimer <= 0) {
+        this.mesh.scale.set(1, 1, 1);
+        this.mesh.position.y = 0;
         this._hide();
       }
       return null;
@@ -162,14 +189,14 @@ export class Roach {
       } else {
         this.angle = norm(Math.atan2(this.home.z - this.z, this.home.x - this.x));
         if (dist(this.x, this.z, this.home.x, this.home.z) < HIDEOUT_RADIUS) {
-          this._hide();
+          this._startDuck();
           return 'retreated';
         }
       }
     } else if (this.state === 'fleeing') {
       this.angle = norm(Math.atan2(this.fleeTarget.z - this.z, this.fleeTarget.x - this.x));
       if (dist(this.x, this.z, this.fleeTarget.x, this.fleeTarget.z) < HIDEOUT_RADIUS) {
-        this._hide();
+        this._startDuck();
         return 'escaped';
       }
     }

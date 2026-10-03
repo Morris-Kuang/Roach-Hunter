@@ -57,12 +57,6 @@ export function buildRoom(scene) {
   floor.rotation.x = -Math.PI / 2;
   room.add(floor);
 
-  const rug = new THREE.Mesh(
-    new THREE.CircleGeometry(1.5, 40),
-    new THREE.MeshStandardMaterial({ color: 0x8a3b3b, roughness: 1 })
-  );
-  rug.rotation.x = -Math.PI / 2; rug.position.set(0.6, 0.005, 0.8);
-  room.add(rug);
 
   const wallMat = new THREE.MeshStandardMaterial({ color: 0xece4d6, roughness: 1 });
   const WALL_H = 2.3;
@@ -77,6 +71,10 @@ export function buildRoom(scene) {
   rightWall.rotation.y = -Math.PI / 2;
   rightWall.position.set(HALF_W, WALL_H / 2, 0);
   room.add(rightWall);
+  const frontWall = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2, WALL_H), wallMat.clone());
+  frontWall.rotation.y = Math.PI;
+  frontWall.position.set(0, WALL_H / 2, HALF_D);
+  room.add(frontWall);
 
   const window1 = box(1.6, 1.0, 0.05, 0x9fd6e8, { emissive: 0x9fd6e8, emissiveIntensity: 0.35 });
   window1.position.set(-2.6, 1.5, -HALF_D + 0.03);
@@ -136,7 +134,7 @@ export function buildRoom(scene) {
 
   room.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   floor.castShadow = false;
-  backWall.castShadow = false; leftWall.castShadow = false; rightWall.castShadow = false;
+  backWall.castShadow = false; leftWall.castShadow = false; rightWall.castShadow = false; frontWall.castShadow = false;
   window1.castShadow = false;
 
   return { room, floor };

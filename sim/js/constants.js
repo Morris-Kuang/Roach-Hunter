@@ -63,6 +63,7 @@ export const CAPTURE_HOLD_TIME = 0.32;  // seconds motors stay stopped during a 
 export const CAPTURE_SUCCESS_BASE = 0.78;
 export const CAPTURE_SUCCESS_FLEEING_FACTOR = 0.35;
 export const SQUASH_DURATION = 0.35;    // seconds, flatten-and-vanish animation on a hit
+export const DUCK_DURATION = 0.3;       // seconds, shrink-into-cover animation on reaching a hideout
 export const SWATTER_REST_ANGLE = -1.1;  // rad, cocked/idle pose
 export const SWATTER_STRIKE_ANGLE = 0.35; // rad, swung down in front of the chassis
 
@@ -72,23 +73,31 @@ export const SWATTER_STRIKE_ANGLE = 0.35; // rad, swung down in front of the cha
 export const ROACH_POOL_SIZE = 4;
 export const FORAGE_SPEED_MIN = 0.10, FORAGE_SPEED_MAX = 0.22;  // m/s, cautious foraging
 export const FLEE_SPEED_MIN = 1.00, FLEE_SPEED_MAX = 1.40;      // m/s, panic sprint for cover
-export const FORAGE_DURATION_MIN = 8, FORAGE_DURATION_MAX = 18; // s, before it heads home on its own
-export const HIDDEN_INTERVAL_MIN = 6, HIDDEN_INTERVAL_MAX = 16; // s, spent out of sight before re-emerging
+export const FORAGE_DURATION_MIN = 6, FORAGE_DURATION_MAX = 14; // s, before it heads home on its own
+// Hidden time is deliberately long relative to forage time: with
+// ROACH_POOL_SIZE independent roaches, expected roaches visible at once ~=
+// ROACH_POOL_SIZE * forage/(forage+hidden) -- tuned here for ~1 at a time,
+// occasionally 2, matching the "mostly hidden" design intent (see README).
+export const HIDDEN_INTERVAL_MIN = 16, HIDDEN_INTERVAL_MAX = 34; // s, spent out of sight before re-emerging
 export const HIDEOUT_RADIUS = 0.3;      // m, reaching this near a hideout = gone
 
 // Startle response: probability per second of noticing the robot and
-// bolting, scaled by proximity. Not a hard tripwire distance -- a slow,
-// careful approach has a real chance of staying unnoticed long enough to
-// get close, though it's still the more likely outcome that it gets spotted.
-export const ALERT_RADIUS = 0.95;       // m, beyond this the robot is never noticed
-export const ALERT_BASE_RATE = 1.1;     // 1/s, notice rate when the robot is right on top of it
+// bolting, scaled by proximity. Not a hard tripwire distance -- a careful
+// approach has a real chance of reaching capture range before being noticed.
+export const ALERT_RADIUS = 0.55;       // m, beyond this the robot is never noticed
+export const ALERT_BASE_RATE = 0.32;    // 1/s, notice rate when the robot is right on top of it
 
 // Named hideouts, positioned just outside the furniture footprints below so
 // they're always reachable (not swallowed by the obstacle they belong to).
+// Kept as close to the furniture edge as the roach's own collision radius
+// allows (ROACH_FOOTPRINT_RADIUS + a hair of clearance) -- with a bigger
+// gap a roach's duck-into-cover animation plays out in open floor next to
+// a wall, reading as "it just vanished at the boundary" instead of "it
+// slipped under/behind the furniture".
 export const HIDEOUTS = [
-  { name: 'under the bed', x: -4.6, z: -0.45 },
-  { name: 'behind the wardrobe', x: 5.15, z: 1.4 },
-  { name: 'under the nightstand', x: -3.15, z: -2.85 },
+  { name: 'under the bed', x: -4.6, z: -0.63 },
+  { name: 'behind the wardrobe', x: 5.28, z: 1.4 },
+  { name: 'under the nightstand', x: -3.15, z: -2.98 },
   { name: 'under the desk', x: 4.2, z: -3.2 }
 ];
 

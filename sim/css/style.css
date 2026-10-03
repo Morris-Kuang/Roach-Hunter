@@ -44,10 +44,7 @@ body{
 .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
 .panel-head{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--border);flex-wrap:wrap;gap:6px}
 .badge{font-size:10px;letter-spacing:.06em;color:var(--text-faint)}
-.badge.rec{color:var(--danger);display:flex;align-items:center;gap:5px}
-.badge.rec::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--danger);animation:blink 1.1s steps(2) infinite}
-@media (prefers-reduced-motion:reduce){ .badge.rec::before{animation:none} }
-@keyframes blink{50%{opacity:.15}}
+.badge.rec{color:var(--danger)}
 .canvas-wrap{position:relative;aspect-ratio:5/3;background:#050907}
 .canvas-wrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .canvas-wrap canvas.hud{pointer-events:none}

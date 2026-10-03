@@ -9,10 +9,10 @@
 // ndcX/ndcY are the normalized_error terms from section 2 (0 = centered,
 // +/-1 = edge of frame).
 
-import { clamp, dist } from './utils.js';
+import { clamp, dist, segmentBlocked } from './utils.js';
 import {
   CAM_FOV_DEG, CAM_MAX_RANGE, CONF_THRESHOLD, ROACH_HALF_W, ROACH_HALF_H,
-  MOTION_BLUR_PENALTY, FLEE_SPEED_MAX
+  MOTION_BLUR_PENALTY, FLEE_SPEED_MAX, OBSTACLES
 } from './constants.js';
 
 function estimateBBox(camera, distance) {
@@ -39,6 +39,9 @@ export function detectTarget(camera, robot, roaches, lockedId) {
     if (!r.alive) continue;
     const d = dist(robot.x, robot.z, r.x, r.z);
     if (d > CAM_MAX_RANGE) continue;
+    // No X-ray vision: a roach behind furniture (from the camera's actual
+    // eye position, not the chassis center) isn't a valid detection.
+    if (segmentBlocked(camera.position.x, camera.position.z, r.x, r.z, OBSTACLES)) continue;
 
     const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
     const worldPos = new THREE.Vector3(r.x, 0.07, r.z);
