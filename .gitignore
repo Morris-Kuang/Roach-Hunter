@@ -1,0 +1,26 @@
+# Python virtual environment (local only, ~1GB)
+.venv/
+__pycache__/
+*.pyc
+
+# Base COCO-pretrained checkpoint ultralytics auto-downloads on first train.py run
+yolo11n.pt
+
+# Ultralytics label cache files (regenerated automatically, binary, noisy diffs)
+*.cache
+
+# Raw training stdout captures
+*.log
+
+# Regenerable merge of mhacks.v1i.yolov8/ + ESP3902.v1i.yolov11/ -- see
+# build_combined_dataset.sh. Not committed because the quick symlink-based
+# version used absolute paths that don't survive a clone.
+combined_dataset/
+
+# Training run still in progress -- its checkpoints are mid-write and
+# include full optimizer state (not yet stripped), don't commit a
+# half-finished model.
+runs/detect/runs/roach_combined/
+
+# Redundant with the already-unzipped ESP3902.v1i.yolov11/ (same 899 images)
+mhacks.v1i.yolov8/ESP3902.v1i.yolov11.zip
