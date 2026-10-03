@@ -17,10 +17,8 @@ yolo11n.pt
 # version used absolute paths that don't survive a clone.
 combined_dataset/
 
-# Training run still in progress -- its checkpoints are mid-write and
-# include full optimizer state (not yet stripped), don't commit a
-# half-finished model.
-runs/detect/runs/roach_combined/
+# Checkpoint ultralytics downloads only for its AMP self-check on CUDA
+/weights/
 
 # Redundant with the already-unzipped ESP3902.v1i.yolov11/ (same 899 images)
 mhacks.v1i.yolov8/ESP3902.v1i.yolov11.zip

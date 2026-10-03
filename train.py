@@ -12,9 +12,13 @@ well under 1000 images), though less critical now than with the original
 model sees "clean" images before convergence.
 """
 
+import torch
 from ultralytics import YOLO
 
 DATA = "combined_dataset/data.yaml"
+
+# CUDA on the GPU box, MPS on the Mac, CPU as a last resort
+DEVICE = 0 if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 model = YOLO("yolo11n.pt")
 
@@ -23,7 +27,7 @@ model.train(
     epochs=120,
     patience=30,
     imgsz=640,
-    device="mps",
+    device=DEVICE,
     batch=16,
     project="runs",
     name="roach_combined",
