@@ -16,6 +16,12 @@ import { detectTarget } from './vision.js';
 import { RoachHunterFSM } from './controller.js';
 import { drawMapHud, drawCamHud } from './hud.js';
 import { bindTelemetry } from './telemetry.js';
+import { parseLocation, nearestLocation } from './chat.js';
+
+function formatClock(simTime) {
+  const mm = Math.floor(simTime / 60), ss = Math.floor(simTime % 60);
+  return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
+}
 
 if (typeof THREE === 'undefined') {
   document.getElementById('log').textContent = 'Failed to load 3D engine.';
@@ -82,7 +88,12 @@ function boot() {
   const mapWrap = document.getElementById('mapWrap'), camWrap = document.getElementById('camWrap');
 
   const mapRenderer = new THREE.WebGLRenderer({ canvas: mapGl, antialias: true });
-  const camRenderer = new THREE.WebGLRenderer({ canvas: camGl, antialias: true });
+  // preserveDrawingBuffer: the onboard-cam feed gets screenshotted (see
+  // captureCamSnapshot()) for the chat's lost-target photo. Without this,
+  // the browser is free to clear/discard the WebGL drawing buffer right
+  // after compositing, and reading it back via drawImage/toDataURL can come
+  // back blank or garbled.
+  const camRenderer = new THREE.WebGLRenderer({ canvas: camGl, antialias: true, preserveDrawingBuffer: true });
   [mapRenderer, camRenderer].forEach((r) => {
     if (r.outputEncoding !== undefined) r.outputEncoding = THREE.sRGBEncoding;
     r.shadowMap.enabled = true;
@@ -114,6 +125,192 @@ function boot() {
   }
   window.addEventListener('resize', onResize);
 
+  // ---- tip-line chat (floating widget, bottom-right) ----
+  const chatFloat = document.getElementById('chatFloat');
+  const chatFloatToggle = document.getElementById('chatFloatToggle');
+  chatFloatToggle.addEventListener('click', () => chatFloat.classList.toggle('collapsed'));
+
+  const chatLogEl = document.getElementById('chatLog');
+  const chatForm = document.getElementById('chatForm');
+  const chatInput = document.getElementById('chatInput');
+  const chatSendBtn = document.getElementById('chatSendBtn');
+  const agentBadge = document.getElementById('agentBadge');
+
+  const WHO_LABEL = { user: 'YOU', robot: 'ROBOT' };
+  function postChatMessage(who, text, imageDataUrl) {
+    const div = document.createElement('div');
+    div.className = 'chat-msg ' + who;
+    const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    div.innerHTML = '<span class="who">' + (WHO_LABEL[who] || who.toUpperCase()) + '<span class="ts">' + ts + '</span></span>'
+      + (imageDataUrl ? '<img class="snap" src="' + imageDataUrl + '">' : '')
+      + '<span class="txt"></span>';
+    div.querySelector('.txt').textContent = text;
+    chatLogEl.appendChild(div);
+    chatLogEl.scrollTop = chatLogEl.scrollHeight;
+    return div;
+  }
+  const postRobotMessage = (text, imageDataUrl) => postChatMessage('robot', text, imageDataUrl);
+
+  // Composite the onboard-cam's WebGL render + its 2D HUD overlay (bounding
+  // box, crosshair, scanline) into one still frame -- called right after a
+  // render so the GL drawing buffer still holds this frame's pixels.
+  function captureCamSnapshot() {
+    const w = camGl.width, h = camGl.height;
+    if (!w || !h) return null;
+    const off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    const octx = off.getContext('2d');
+    octx.drawImage(camGl, 0, 0, w, h);
+    octx.drawImage(camHud, 0, 0, w, h);
+    return off.toDataURL('image/jpeg', 0.75);
+  }
+
+  // A real product doesn't just go silent for the ~1-2s the agent call
+  // takes -- show that it's working, and don't let a second submit race it.
+  function showTyping() {
+    const div = postChatMessage('robot', '思考中...');
+    div.classList.add('typing');
+    return () => div.remove();
+  }
+  function setChatBusy(busy) {
+    chatInput.disabled = busy;
+    chatSendBtn.disabled = busy;
+    if (!busy) chatInput.focus();
+  }
+
+  // At the exact moment a tracked target is lost, grab a still of the
+  // onboard cam and have the agent's LLM narrate what happened -- grounded
+  // in the actual sim facts (location, the roach's real behavior state, its
+  // flee target if any), not a canned template every time.
+  async function handleTargetLost(targetId, simTime) {
+    const place = nearestLocation(state.robot.x, state.robot.z);
+    const snapshot = captureCamSnapshot();
+    const roach = state.roaches.find((r) => r.id === targetId);
+    const behavior = roach ? roach.state : null;
+    const fleeTo = roach && roach.state === 'fleeing' && roach.fleeTarget ? roach.fleeTarget.name : null;
+    // Prefer the roach's own true position (still tracked internally even
+    // though out of camera view) over the robot's -- for the heatmap we
+    // care about where roaches tend to vanish, not where the robot stood.
+    state.lostPoints.push(roach ? { x: roach.x, z: roach.z } : { x: state.robot.x, z: state.robot.z });
+
+    const div = postRobotMessage(formatClock(simTime) + '，剛剛在' + place.zh + '附近跟丟了，正在分析畫面...', snapshot);
+
+    try {
+      const res = await fetch('http://localhost:8001/describe_loss', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_id: targetId,
+          location_name: place.name,
+          location_zh: place.zh,
+          sim_time: formatClock(simTime),
+          roach_behavior: behavior,
+          flee_target: fleeTo,
+        }),
+      });
+      if (!res.ok) throw new Error('bad status ' + res.status);
+      const data = await res.json();
+      div.querySelector('.txt').textContent = formatClock(simTime) + '，' + data.description;
+    } catch (err) {
+      div.querySelector('.txt').textContent = formatClock(simTime) + '，剛剛在' + place.zh + '附近跟丟了，正在找。';
+    }
+  }
+
+  // Lightweight liveness check -- GET the agent's own port with no business
+  // logic involved (a 404 still proves the process is up; only a refused/
+  // failed connection means it isn't), polled periodically so the badge
+  // reflects reality instead of only updating after someone sends a tip.
+  async function checkAgentHealth() {
+    try {
+      const res = await fetch('http://localhost:8001/health', { method: 'GET' });
+      if (!res.ok) throw new Error('bad status ' + res.status);
+      agentBadge.textContent = '● agent connected';
+      agentBadge.className = 'badge agent-ok';
+    } catch (err) {
+      agentBadge.textContent = '● agent offline (local fallback)';
+      agentBadge.className = 'badge agent-off';
+    }
+    setTimeout(checkAgentHealth, 10000);
+  }
+
+  // Shared by the chat box (typed, already-parsed `loc`) and the ASI:One
+  // bridge polling below (a tip an external agent already parsed for us) --
+  // either way, a real location report should actually dispatch the robot.
+  function applyLocationReport(loc) {
+    if (fsm.reportSighting(loc.x, loc.z)) {
+      telemetry.log('TIP RECEIVED · heading to ' + loc.name, '', state.simTime);
+      postRobotMessage('收到，我去' + loc.zh + '附近蹲點看看！');
+      startPatrol();
+    } else {
+      postRobotMessage('現在正在追一隻真的看到的蟑螂，等這邊處理完再去看看。');
+    }
+  }
+
+  // The chat box talks to the real roach_tip_agent.py (ASI:One Agent
+  // Challenge entry) directly over its local REST endpoint, not a copy of
+  // the parsing logic in this file -- that agent does the actual
+  // understanding (ASI:One's LLM, or its own keyword fallback) and hands
+  // back the parsed (x, z) for us to dispatch. Falls back to local keyword
+  // matching only if the agent process isn't reachable, so the chat box
+  // still works for a quick test without it running.
+  chatForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = chatInput.value.trim();
+    if (!text) return;
+    postChatMessage('user', text);
+    chatInput.value = '';
+    setChatBusy(true);
+    const clearTyping = showTyping();
+
+    try {
+      const res = await fetch('http://localhost:8001/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error('agent returned ' + res.status);
+      const data = await res.json();
+      clearTyping();
+      postChatMessage('robot', data.reply);
+      if (typeof data.x === 'number' && typeof data.z === 'number') {
+        if (fsm.reportSighting(data.x, data.z)) {
+          telemetry.log('TIP RECEIVED · heading to ' + data.name, '', state.simTime);
+          startPatrol();
+        }
+      }
+    } catch (err) {
+      clearTyping();
+      const loc = parseLocation(text);
+      if (!loc) {
+        postRobotMessage('（找不到 ASI 代理人，用本地關鍵字比對：）沒聽懂是哪裡耶，可以講清楚一點嗎？像是床、床頭櫃、衣櫃、書桌、垃圾桶、或窗戶附近。');
+        return;
+      }
+      applyLocationReport(loc);
+    } finally {
+      setChatBusy(false);
+    }
+  });
+
+  // ASI:One bridge: a separate Python agent (../agent/roach_tip_agent.py,
+  // registered on Agentverse for the MHacks ASI:One Agent Challenge) parses
+  // a chat message sent through ASI:One and POSTs the location to
+  // serve_nocache.py's /api/report. We have no backend of our own to push
+  // to us, so just poll for it.
+  async function pollForAgentTip() {
+    try {
+      const res = await fetch('/api/poll', { cache: 'no-store' });
+      const tip = await res.json();
+      if (tip && typeof tip.x === 'number' && typeof tip.z === 'number') {
+        postChatMessage('robot', (tip.zh || tip.name) + '附近出現蟑螂');
+        applyLocationReport(tip);
+      }
+    } catch (e) {
+      // Bridge endpoint unreachable (serve_nocache.py not running some other
+      // way, or just a hiccup) -- silently retry next tick.
+    }
+    setTimeout(pollForAgentTip, 1500);
+  }
+
   // ---- telemetry / log / FSM ----
   const telemetry = bindTelemetry();
   const fsm = new RoachHunterFSM((from, to, targetId, tag) => {
@@ -125,8 +322,15 @@ function boot() {
       const victim = state.roaches.find((r) => r.id === targetId);
       if (victim) spawnCover(victim.x, victim.z);
     }
-    else if (to === 'RECOVER') telemetry.log('TARGET LOST · recovering', 'warn', state.simTime);
+    else if (to === 'RECOVER') {
+      telemetry.log('TARGET LOST · recovering', 'warn', state.simTime);
+      state._pendingLossEvent = { targetId, simTime: state.simTime };
+    }
     else if (to === 'SEARCH' && from === 'RECOVER') telemetry.log('RECOVERY TIMEOUT · resuming scan', 'warn', state.simTime);
+    else if (to === 'SEARCH' && from === 'STAKEOUT') {
+      telemetry.log('STAKEOUT TIMED OUT · resuming patrol', 'warn', state.simTime);
+      postRobotMessage(formatClock(state.simTime) + '，蹲點了一下子都沒看到，我先回去巡邏囉。');
+    }
   });
 
   let state;
@@ -136,15 +340,16 @@ function boot() {
     const roaches = [];
     for (let i = 0; i < ROACH_POOL_SIZE; i++) roaches.push(new Roach(i, room));
     state = {
-      simTime: 0, running: true,
+      simTime: 0, running: false, everStarted: false,
       robot: { x: 0.4, z: 1.0, angle: Math.PI, battery: 100, caught: 0, missed: 0 },
       roaches, mode: 'SEARCH', lockedId: null,
-      fpsSmooth: 60, last: performance.now(), charging: false
+      fpsSmooth: 60, last: performance.now(), charging: false,
+      showHeatmap: false, lostPoints: [], caughtPoints: []
     };
     fsm.reset();
     telemetry.clearLog();
     telemetry.log('SYSTEM BOOT · sensor fusion online', '', 0);
-    telemetry.log('PATROL STARTED · no targets in view yet', '', 0);
+    telemetry.log('STANDING BY · press START to begin patrol', '', 0);
   }
 
   // Progress through the swatter's downward strike, 0 (cocked) -> 1 (impact),
@@ -189,6 +394,7 @@ function boot() {
     const dt = Math.min(0.05, (now - state.last) / 1000);
     state.last = now;
 
+    updateWorld(dt); // roaches live their own life regardless of patrol state
     if (state.running) step(dt);
 
     robotMesh.position.set(state.robot.x, 0, state.robot.z);
@@ -208,6 +414,17 @@ function boot() {
     drawCamHud(camHudCtx, camHud, camDims, camCamera, state, detection);
     telemetry.update(state, state._lastCommand || { turn: 0, speed: 0 }, detection, state._lastWallCm || 999, dt);
 
+    // A target-lost event is detected inside step() (via the FSM's onLog
+    // callback), which runs *before* this frame's render + HUD draw above --
+    // capturing a screenshot there would grab last frame's (or an empty)
+    // buffer. Queue it and take the photo only now, once this frame's cam
+    // view is actually on screen.
+    if (state._pendingLossEvent) {
+      const ev = state._pendingLossEvent;
+      state._pendingLossEvent = null;
+      handleTargetLost(ev.targetId, ev.simTime);
+    }
+
     requestAnimationFrame(frame);
   }
 
@@ -216,10 +433,14 @@ function boot() {
   function attemptCapture(victim, s, rb) {
     const wasFleeing = victim.state === 'fleeing';
     const chance = CAPTURE_SUCCESS_BASE * (wasFleeing ? CAPTURE_SUCCESS_FLEEING_FACTOR : 1);
-    if (Math.random() < chance) {
+    const place = nearestLocation(victim.x, victim.z);
+    const success = Math.random() < chance;
+
+    if (success) {
       victim.markCaught();
       rb.caught = (rb.caught || 0) + 1;
       spawnEffect(victim.x, victim.z);
+      state.caughtPoints.push({ x: victim.x, z: victim.z });
       state.captureFx = { result: 'success', startTime: s.simTime };
       telemetry.log('CAPTURE SUCCESS · roach #' + victim.id + ' squashed', 'catch', s.simTime);
     } else {
@@ -228,13 +449,44 @@ function boot() {
       telemetry.log('CAPTURE ATTEMPT MISSED · target bolted', 'warn', s.simTime);
       if (!wasFleeing) victim.startle();
     }
+
+    describeCaptureOutcome(place, s.simTime, success, wasFleeing);
   }
 
-  function step(dt) {
+  // Same pattern as handleTargetLost: real sim facts (location, outcome,
+  // whether the target was fleeing) sent to the agent's LLM for a grounded,
+  // vivid narration instead of a fixed template every time.
+  async function describeCaptureOutcome(place, simTime, success, wasFleeing) {
+    const div = postRobotMessage(formatClock(simTime) + '，' + (success ? '抓到了' : '差一點點') + '，正在確認狀況...');
+    try {
+      const res = await fetch('http://localhost:8001/describe_capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          location_name: place.name,
+          location_zh: place.zh,
+          sim_time: formatClock(simTime),
+          success,
+          was_fleeing: wasFleeing,
+        }),
+      });
+      if (!res.ok) throw new Error('bad status ' + res.status);
+      const data = await res.json();
+      div.querySelector('.txt').textContent = formatClock(simTime) + '，' + data.description;
+    } catch (err) {
+      div.querySelector('.txt').textContent = formatClock(simTime) + '，在' + place.zh + '附近'
+        + (success ? '抓到了！蟑螂處理掉了。' : '差一點點，還是讓牠跑掉了。');
+    }
+  }
+
+  // Roach behavior (foraging, hiding, fleeing) -- runs every frame regardless
+  // of whether the robot's patrol is active. A real bedroom's roaches don't
+  // wait for the hunter to be switched on, and freezing them during
+  // ROBOT STANDBY (or while PAUSEd) made the whole room look switched off.
+  function updateWorld(dt) {
     const s = state, rb = s.robot;
     s.simTime += dt;
 
-    // Roach behavior (independent of the robot's algorithm).
     s.roaches.forEach((r) => {
       const event = r.update(dt, s.simTime, rb);
       if (!event) return;
@@ -247,6 +499,10 @@ function boot() {
       else if (event === 'escaped') telemetry.log('TARGET #' + r.id + ' ESCAPED · lost near ' + r.fleeTarget.name, 'warn', s.simTime);
       else if (event === 'retreated') telemetry.log('TARGET #' + r.id + ' LOST · slipped back into hiding', 'warn', s.simTime);
     });
+  }
+
+  function step(dt) {
+    const s = state, rb = s.robot;
 
     // 1. Vision: "ESP32-CAM -> Object detection on laptop"
     const detection = detectTarget(camCamera, rb, s.roaches, fsm.lockedId);
@@ -257,7 +513,7 @@ function boot() {
     if (rb.battery <= 18 && !s.charging) { s.charging = true; telemetry.log('BATTERY LOW (' + Math.round(rb.battery) + '%) · returning to dock', 'warn', s.simTime); }
     if (rb.battery <= 0) { rb.battery = 100; s.charging = false; telemetry.log('RECHARGE COMPLETE · resuming patrol', 'catch', s.simTime); }
 
-    const command = fsm.step(dt, detection, wallCm);
+    const command = fsm.step(dt, detection, wallCm, rb);
     s.mode = fsm.mode;
     s.lockedId = fsm.lockedId;
 
@@ -277,6 +533,13 @@ function boot() {
       const victim = target || s.roaches.reduce((a, b) => (dist(rb.x, rb.z, b.x, b.z) < dist(rb.x, rb.z, a.x, a.z) ? b : a));
       if (victim && victim.alive) {
         attemptCapture(victim, s, rb);
+        // We just resolved a capture attempt against this exact roach this
+        // frame (vision-driven path). Disarm the contact-fallback below for
+        // it so it doesn't immediately roll a *second* attempt on the same
+        // roach in the same tick just because it's still standing within
+        // CATCH_RADIUS right after a miss -- that produced two contradictory
+        // outcomes (one miss, one hit) stamped at the identical sim time.
+        victim._contactArmed = false;
       } else {
         // Gripper cycled on empty air -- the target slipped away mid-hold.
         // Still a failed attempt, so it still counts as a miss.
@@ -308,20 +571,49 @@ function boot() {
     state._lastWallCm = wallCm;
   }
 
+  // Shared by the START/RESUME button and an incoming chat tip -- reporting
+  // a sighting should actually make the robot go, not just change its FSM
+  // mode while the patrol loop stays switched off waiting for a button click.
+  function startPatrol() {
+    if (state.running) return;
+    const firstStart = !state.everStarted;
+    state.running = true;
+    state.everStarted = true;
+    telemetry.els.pauseBtn.textContent = 'PAUSE';
+    telemetry.els.sysPill.textContent = 'ROBOT ONLINE';
+    telemetry.log(firstStart ? 'PATROL STARTED · no targets in view yet' : 'RESUME · patrol continuing', '', state.simTime);
+  }
+
   telemetry.els.pauseBtn.addEventListener('click', () => {
-    state.running = !state.running;
-    telemetry.els.pauseBtn.textContent = state.running ? 'PAUSE' : 'RESUME';
-    telemetry.els.sysPill.textContent = state.running ? 'SYSTEM ONLINE' : 'SYSTEM PAUSED';
-    telemetry.log(state.running ? 'RESUME · patrol continuing' : 'PAUSED · holding position', '', state.simTime);
+    if (state.running) {
+      state.running = false;
+      telemetry.els.pauseBtn.textContent = 'RESUME';
+      telemetry.els.sysPill.textContent = 'ROBOT PAUSED';
+      telemetry.log('PAUSED · holding position', '', state.simTime);
+    } else {
+      startPatrol();
+    }
   });
   telemetry.els.resetBtn.addEventListener('click', () => {
     reset();
-    telemetry.els.pauseBtn.textContent = 'PAUSE';
-    telemetry.els.sysPill.textContent = 'SYSTEM ONLINE';
+    telemetry.els.pauseBtn.textContent = 'START';
+    telemetry.els.sysPill.textContent = 'ROBOT STANDBY';
+    heatmapBtn.classList.remove('active');
+  });
+
+  // Infestation heatmap: red = where roaches tend to vanish from (lost
+  // points), green = where they actually get caught -- accumulated for the
+  // whole session, cleared on RESET along with everything else.
+  const heatmapBtn = document.getElementById('heatmapBtn');
+  heatmapBtn.addEventListener('click', () => {
+    state.showHeatmap = !state.showHeatmap;
+    heatmapBtn.classList.toggle('active', state.showHeatmap);
   });
 
   onResize();
   reset();
   state.last = performance.now();
   requestAnimationFrame(frame);
+  pollForAgentTip();
+  checkAgentHealth();
 }

@@ -1,12 +1,13 @@
 // All tunable numbers live here so the algorithm and the scene can be
 // adjusted without hunting through the rest of the codebase.
 //
-// Values are deliberately picked to model a real household encounter rather
-// than an arcade chase: a small hobby chassis is not faster than a startled
-// cockroach, cockroaches spend most of their time hidden and only forage
-// occasionally, they bolt for the nearest cover well before a slow robot can
-// reach grabbing distance, and even a clean grab isn't guaranteed. See
-// README.md "Why the robot mostly loses" for the reasoning.
+// Catch-rate tuning: originally set so the robot mostly lost (see
+// README.md "Why the robot mostly loses"), with flee speed well above
+// MAX_SPEED and a stingy capture success rate. Retuned for a more winnable
+// demo -- robot speed closer to flee speed, roaches noticing the robot
+// less often, and higher capture odds (especially against a fleeing
+// target) -- while keeping roaches hidden most of the time and nothing
+// guaranteed, so it's easier without being trivial/arcade-y.
 
 // ---- room / world (meters) ----
 export const HALF_W = 6, HALF_D = 4;   // room is 12 x 8
@@ -14,7 +15,7 @@ export const HALF_W = 6, HALF_D = 4;   // room is 12 x 8
 // when a roach wanders directly into the chassis outside of camera view
 // (see main.js's contact-capture pass), independent of the vision pipeline.
 export const CATCH_RADIUS = 0.16;
-export const MAX_SPEED = 0.62;         // m/s, robot top speed (small TT-motor 2WD chassis)
+export const MAX_SPEED = 0.85;         // m/s, robot top speed (small TT-motor 2WD chassis)
 export const TURN_RATE = 2.4;          // rad/s, robot max turn rate
 export const ROBOT_FOOTPRINT_RADIUS = 0.22; // m, for furniture collision
 
@@ -58,10 +59,11 @@ export const CAPTURE_HOLD_TIME = 0.32;  // seconds motors stay stopped during a 
 
 // ---- capture reliability ----
 // Even at point-blank range a DIY gripper doesn't grab cleanly every time,
-// and it's far worse against a roach that's already mid-sprint. Tuned so a
-// clean, unhurried approach usually pays off, but nothing is guaranteed.
-export const CAPTURE_SUCCESS_BASE = 0.78;
-export const CAPTURE_SUCCESS_FLEEING_FACTOR = 0.35;
+// and it's worse against a roach that's already mid-sprint. Tuned so most
+// approaches pay off -- including fleeing targets -- but nothing is
+// perfectly guaranteed.
+export const CAPTURE_SUCCESS_BASE = 0.90;
+export const CAPTURE_SUCCESS_FLEEING_FACTOR = 0.55;
 export const SQUASH_DURATION = 0.35;    // seconds, flatten-and-vanish animation on a hit
 export const DUCK_DURATION = 0.3;       // seconds, shrink-into-cover animation on reaching a hideout
 export const SWATTER_REST_ANGLE = -1.1;  // rad, cocked/idle pose
@@ -72,20 +74,20 @@ export const SWATTER_STRIKE_ANGLE = 0.35; // rad, swung down in front of the cha
 // at once, and each one eventually heads back to cover on its own.
 export const ROACH_POOL_SIZE = 4;
 export const FORAGE_SPEED_MIN = 0.10, FORAGE_SPEED_MAX = 0.22;  // m/s, cautious foraging
-export const FLEE_SPEED_MIN = 1.00, FLEE_SPEED_MAX = 1.40;      // m/s, panic sprint for cover
+export const FLEE_SPEED_MIN = 0.85, FLEE_SPEED_MAX = 1.15;      // m/s, panic sprint for cover
 export const FORAGE_DURATION_MIN = 6, FORAGE_DURATION_MAX = 14; // s, before it heads home on its own
 // Hidden time is deliberately long relative to forage time: with
 // ROACH_POOL_SIZE independent roaches, expected roaches visible at once ~=
 // ROACH_POOL_SIZE * forage/(forage+hidden) -- tuned here for ~1 at a time,
 // occasionally 2, matching the "mostly hidden" design intent (see README).
-export const HIDDEN_INTERVAL_MIN = 16, HIDDEN_INTERVAL_MAX = 34; // s, spent out of sight before re-emerging
+export const HIDDEN_INTERVAL_MIN = 26, HIDDEN_INTERVAL_MAX = 52; // s, spent out of sight before re-emerging
 export const HIDEOUT_RADIUS = 0.3;      // m, reaching this near a hideout = gone
 
 // Startle response: probability per second of noticing the robot and
 // bolting, scaled by proximity. Not a hard tripwire distance -- a careful
-// approach has a real chance of reaching capture range before being noticed.
+// approach has a good chance of reaching capture range before being noticed.
 export const ALERT_RADIUS = 0.55;       // m, beyond this the robot is never noticed
-export const ALERT_BASE_RATE = 0.32;    // 1/s, notice rate when the robot is right on top of it
+export const ALERT_BASE_RATE = 0.18;    // 1/s, notice rate when the robot is right on top of it
 
 // Named hideouts, positioned just outside the furniture footprints below so
 // they're always reachable (not swallowed by the obstacle they belong to).
@@ -98,8 +100,55 @@ export const HIDEOUTS = [
   { name: 'under the bed', x: -4.6, z: -0.63 },
   { name: 'behind the wardrobe', x: 5.28, z: 1.4 },
   { name: 'under the nightstand', x: -3.15, z: -2.98 },
-  { name: 'under the desk', x: 4.2, z: -3.2 }
+  { name: 'under the desk', x: 4.2, z: -3.2 },
+  { name: 'behind the sofa', x: -4.9, z: 2.3 },
+  { name: 'near the window', x: -2.0, z: -3.6 },
+  { name: 'behind the trash can', x: 4.5, z: 3.1 }
 ];
+
+// Named landmarks a user can reference in the tip-line chat ("I saw one
+// near the desk!") and that the lost-target notification snaps to when
+// reporting roughly where a tracked target vanished. Open-floor points just
+// outside each piece of furniture's OBSTACLES footprint (not the HIDEOUTS
+// points, which are specifically "inside/under the furniture" and not
+// floor-navigable). Order matters for chat.js's keyword matching: more
+// specific/compound terms (e.g. the nightstand's "床頭櫃") must come before
+// generic ones they textually contain (e.g. the bed's "床").
+//
+// `name` is the English label used in the (English-styled) Event Log,
+// consistent with its other entries (e.g. "TARGET ACQUIRED #3"); `zh` is
+// what actually gets spoken in the chat panel, since a real person chatting
+// in Chinese would never see the robot answer back with a stray English
+// noun phrase like "the wardrobe" stitched into an otherwise Chinese reply.
+export const REPORTABLE_LOCATIONS = [
+  { name: 'the nightstand', zh: '床頭櫃', keywords: ['床頭櫃', '床頭', 'nightstand'], x: -2.6, z: -3.3 },
+  { name: 'the wardrobe', zh: '衣櫃', keywords: ['衣櫃', '衣柜', '衣櫥', 'wardrobe', 'closet'], x: 4.7, z: 1.4 },
+  { name: 'the desk', zh: '書桌', keywords: ['書桌', '電腦桌', '桌子', '桌邊', 'desk', 'table'], x: 4.2, z: -2.6 },
+  { name: 'the trash can', zh: '垃圾桶', keywords: ['垃圾桶', '垃圾筒', 'trash', 'garbage', 'bin'], x: 4.5, z: 3.1 },
+  { name: 'the window', zh: '窗戶', keywords: ['窗戶', '窗邊', '窗台', 'window'], x: -2.0, z: -3.2 },
+  { name: 'the bed', zh: '床', keywords: ['床邊', '床上', '床底', '棉被', '枕頭', '床', 'bed'], x: -3.0, z: -1.5 },
+  { name: 'the sofa', zh: '沙發', keywords: ['沙發', 'sofa', 'couch'], x: -4.9, z: 2.3 },
+  // Roaches aren't only ever near furniture -- open floor along each wall,
+  // clear of the furniture OBSTACLES above.
+  { name: 'the left wall', zh: '左邊牆壁', keywords: ['左牆', '左邊牆', '左邊的牆', 'left wall'], x: -5.4, z: 2.5 },
+  { name: 'the right wall', zh: '右邊牆壁', keywords: ['右牆', '右邊牆', '右邊的牆', 'right wall'], x: 5.4, z: -2.0 },
+  { name: 'the back wall', zh: '後面牆壁', keywords: ['後牆', '後面牆', '後面的牆', 'back wall'], x: 0.5, z: -3.6 },
+  { name: 'the front wall', zh: '前面牆壁', keywords: ['前牆', '前面牆', '前面的牆', 'front wall'], x: -2.5, z: 3.6 }
+];
+
+// ---- stakeout (chat-reported sighting response) ----
+// Responding to a tip is a deliberate beeline, not a cautious patrol crawl,
+// so it's faster than normal SEARCH scanning -- but still well under
+// MAX_SPEED since it's driving somewhat blind toward a secondhand report
+// rather than a camera-confirmed target.
+export const STAKEOUT_SPEED = MAX_SPEED * 0.75;
+export const STAKEOUT_ARRIVAL_RADIUS = 0.5;  // m, "close enough" to the reported spot
+export const STAKEOUT_WAIT_TIME = 12;        // s, how long to linger before giving up and resuming patrol
+// Responding to a tip always starts by turning clockwise (never "whichever
+// way is shorter") -- predictable and consistent to watch, even if it's
+// occasionally the long way around. Stays in the turn (mostly in place)
+// until roughly facing the target, then drives.
+export const STAKEOUT_ALIGN_THRESHOLD = 0.1; // rad (~5.7deg)
 
 // Solid collision footprints matching the furniture built in scene/room.js --
 // roaches (and the robot) are physically blocked by these, they don't just
@@ -110,5 +159,7 @@ export const OBSTACLES = [
   { type: 'rect', x1: -3.425, x2: -2.875, z1: -3.55, z2: -3.05 },  // nightstand
   { type: 'rect', x1: HALF_W - 0.65, x2: HALF_W, z1: 0.55, z2: 2.25 }, // wardrobe
   { type: 'circle', x: 3.3, z: -3.2, r: 0.09 },  // desk leg
-  { type: 'circle', x: 5.1, z: -3.2, r: 0.09 }   // desk leg
+  { type: 'circle', x: 5.1, z: -3.2, r: 0.09 },  // desk leg
+  { type: 'circle', x: 5.0, z: 3.3, r: 0.22 },    // trash can (isolated, open floor)
+  { type: 'rect', x1: -HALF_W + 0.05, x2: -HALF_W + 0.8, z1: 1.5, z2: 3.1 } // sofa (front-left, against left wall)
 ];

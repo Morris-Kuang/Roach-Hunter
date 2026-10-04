@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Roach Hunter HUD</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -13,10 +12,11 @@
   <div class="topbar">
     <div class="brand">ROACH HUNTER <span class="tag">AIOT SIM · 3D</span></div>
     <div class="statusgroup">
-      <span class="pill" id="sysPill">SYSTEM ONLINE</span>
+      <span class="pill" id="sysPill">ROBOT STANDBY</span>
       <span class="uptime" id="uptime">UPTIME 00:00:00</span>
-      <button class="btn" id="pauseBtn" type="button">PAUSE</button>
+      <button class="btn" id="pauseBtn" type="button">START</button>
       <button class="btn" id="resetBtn" type="button">RESET</button>
+      <button class="btn" id="heatmapBtn" type="button">HEATMAP</button>
     </div>
   </div>
 
@@ -67,6 +67,22 @@
   </div>
 
   <footer class="credit">Simulated bedroom · synthetic sensor telemetry · for hackathon demo purposes</footer>
+</div>
+
+<div class="chat-float" id="chatFloat">
+  <button class="chat-float-head" id="chatFloatToggle" type="button">
+    <span>Tip Line · report a sighting</span>
+    <span class="badge" id="agentBadge">● checking agent…</span>
+    <span class="chat-float-chevron" id="chatFloatChevron">&#9662;</span>
+  </button>
+  <div class="chat-float-body" id="chatFloatBody">
+    <div class="chat-log" id="chatLog"></div>
+    <form class="chat-input-row" id="chatForm">
+      <input class="chat-input" id="chatInput" type="text" autocomplete="off"
+             placeholder="e.g. 蟑螂剛剛在床邊出現，我有看到！">
+      <button class="btn" id="chatSendBtn" type="submit">SEND</button>
+    </form>
+  </div>
 </div>
 
 <script type="module" src="js/main.js"></script>

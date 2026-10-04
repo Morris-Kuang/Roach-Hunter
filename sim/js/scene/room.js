@@ -132,6 +132,33 @@ export function buildRoom(scene) {
   wardrobe.position.set(HALF_W - 0.35, 1.0, 1.4);
   room.add(wardrobe);
 
+  // trash can (open floor, front-right corner -- away from all other furniture)
+  const trashCan = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.22, 0.17, 0.42, 16),
+    new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.6, metalness: 0.15 })
+  );
+  trashCan.position.set(5.0, 0.21, 3.3);
+  room.add(trashCan);
+  const trashCanRim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.22, 0.015, 8, 20),
+    new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.6, metalness: 0.2 })
+  );
+  trashCanRim.rotation.x = Math.PI / 2;
+  trashCanRim.position.set(5.0, 0.42, 3.3);
+  room.add(trashCanRim);
+
+  // sofa (front-left corner, against the left wall -- was bare open floor)
+  const sofa = new THREE.Group();
+  const sofaBase = box(0.75, 0.38, 1.6, 0x3b5a73); sofaBase.position.set(0, 0.19, 0);
+  const sofaBack = box(0.18, 0.5, 1.6, 0x33506a); sofaBack.position.set(-0.285, 0.44, 0);
+  const sofaArmA = box(0.75, 0.22, 0.16, 0x33506a); sofaArmA.position.set(0, 0.5, -0.72);
+  const sofaArmB = box(0.75, 0.22, 0.16, 0x33506a); sofaArmB.position.set(0, 0.5, 0.72);
+  const cushionA = box(0.66, 0.14, 0.6, 0x4a6f8c); cushionA.position.set(0.02, 0.45, -0.42);
+  const cushionB = box(0.66, 0.14, 0.6, 0x4a6f8c); cushionB.position.set(0.02, 0.45, 0.42);
+  sofa.add(sofaBase, sofaBack, sofaArmA, sofaArmB, cushionA, cushionB);
+  sofa.position.set(-HALF_W + 0.42, 0, 2.3);
+  room.add(sofa);
+
   room.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   floor.castShadow = false;
   backWall.castShadow = false; leftWall.castShadow = false; rightWall.castShadow = false; frontWall.castShadow = false;

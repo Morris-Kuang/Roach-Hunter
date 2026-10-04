@@ -4,12 +4,36 @@
 import { projectToScreen, segmentBlocked } from './utils.js';
 import { OBSTACLES } from './constants.js';
 
+// Soft translucent blobs at each recorded world point, so repeated nearby
+// points visibly overlap into a brighter hotspot rather than just a pile of
+// identical dots -- a real (if simple) density heatmap, not a scatter plot.
+function drawHeatBlobs(ctx, w, h, dpr, camera, points, rgb) {
+  points.forEach((pt) => {
+    const p = projectToScreen(camera, new THREE.Vector3(pt.x, 0.05, pt.z), w, h, 2.0);
+    if (!p) return;
+    const r = 42 * dpr;
+    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+    grad.addColorStop(0, 'rgba(' + rgb + ',.38)');
+    grad.addColorStop(1, 'rgba(' + rgb + ',0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
 export function drawMapHud(ctx, hud, dims, camera, state) {
   const w = hud.width, h = hud.height, dpr = dims.dpr || 1;
   ctx.clearRect(0, 0, w, h);
   ctx.strokeStyle = 'rgba(78,230,160,.35)';
   ctx.lineWidth = 2 * dpr;
   ctx.strokeRect(1, 1, w - 2, h - 2);
+
+  if (state.showHeatmap) {
+    // "where they come from" (lost) in red/danger, "where they got caught" in green/catch.
+    drawHeatBlobs(ctx, w, h, dpr, camera, state.lostPoints, '220,38,38');
+    drawHeatBlobs(ctx, w, h, dpr, camera, state.caughtPoints, '22,163,74');
+  }
 
   state.roaches.forEach((r) => {
     if (!r.alive) return;

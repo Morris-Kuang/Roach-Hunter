@@ -65,13 +65,20 @@ function nearestHideout(x, z) {
   return best;
 }
 
+function randomHideout() {
+  return HIDEOUTS[Math.floor(Math.random() * HIDEOUTS.length)];
+}
+
 export class Roach {
   constructor(id, room) {
     this.id = id;
     this.mesh = makeRoachMesh();
     this.mesh.visible = false;
     room.add(this.mesh);
-    this.home = HIDEOUTS[id % HIDEOUTS.length];
+    // Not pinned to one fixed hideout for its whole lifetime -- re-rolled on
+    // every _hide() cycle, so over a session roaches surface from all over
+    // the room (every corner/furniture piece), not just the same spot.
+    this.home = randomHideout();
     this.state = 'hidden';
     this.alive = false;
     this.x = this.home.x; this.z = this.home.z; this.angle = 0;
@@ -85,6 +92,7 @@ export class Roach {
     this.alive = false;
     this.mesh.visible = false;
     this.timer = delay !== undefined ? delay : rand(HIDDEN_INTERVAL_MIN, HIDDEN_INTERVAL_MAX);
+    this.home = randomHideout(); // pick a fresh spot for the *next* emergence
   }
 
   _emerge() {

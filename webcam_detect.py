@@ -15,6 +15,7 @@ Controls:
   t - toggle test-time adaptation on/off
   r - reset adapted weights back to the trained checkpoint
   a - toggle test-time augmentation (flip/multi-scale merge) at inference
+  [ / ] - lower/raise the confidence threshold by 0.05 (no restart needed)
 """
 
 import argparse
@@ -72,7 +73,7 @@ def run(weights: str, camera_index: int, conf_thres: float, iou_thres: float, us
     if not cap.isOpened():
         raise RuntimeError(f"Could not open camera {camera_index}")
 
-    print("Press 'q' quit | 't' toggle TTA | 'r' reset adapted weights | 'a' toggle test-time augmentation")
+    print("Press 'q' quit | 't' toggle TTA | 'r' reset adapted weights | 'a' toggle test-time augmentation | '[' / ']' adjust conf threshold")
 
     prev_time = time.time()
     fps = 0.0
@@ -124,7 +125,7 @@ def run(weights: str, camera_index: int, conf_thres: float, iou_thres: float, us
         prev_time = now
 
         status = (
-            f"FPS {fps:4.1f} | TTA {'ON' if tta_enabled else 'OFF'} "
+            f"FPS {fps:4.1f} | conf={conf_thres:.2f} ('['/']' to adjust) | TTA {'ON' if tta_enabled else 'OFF'} "
             f"(steps={adapter.steps} skip_unc={adapter.skipped_uncertain} skip_red={adapter.skipped_redundant}) "
             f"| TTA-aug {'ON' if aug_enabled else 'OFF'}"
         )
@@ -144,6 +145,10 @@ def run(weights: str, camera_index: int, conf_thres: float, iou_thres: float, us
             adapter.reset()
         elif key == ord("a"):
             aug_enabled = not aug_enabled
+        elif key == ord("["):
+            conf_thres = max(0.05, conf_thres - 0.05)
+        elif key == ord("]"):
+            conf_thres = min(0.95, conf_thres + 0.05)
 
     cap.release()
     cv2.destroyAllWindows()
