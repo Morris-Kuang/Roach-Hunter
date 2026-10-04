@@ -46,11 +46,12 @@ CONFIDENCE_THRESHOLD = 0.25
 # STEERING
 # ============================================================
 
-# Turn toward the target until its center enters
-# the middle 35%-65% of the image.
+# Target center < 40% of image width -> turn left
+# Target center > 60% -> turn right
+# Otherwise -> centered
 
-LEFT_BOUNDARY = 0.35
-RIGHT_BOUNDARY = 0.65
+LEFT_BOUNDARY = 0.55
+RIGHT_BOUNDARY = 0.85
 
 
 # ============================================================
@@ -59,11 +60,11 @@ RIGHT_BOUNDARY = 0.65
 
 # Once centered and >= 8% of the frame:
 # begin final attack.
-ATTACK_AREA_THRESHOLD = 0.08
+ATTACK_AREA_THRESHOLD = 0.03
 
 # During attack, once >= 12% of frame:
 # trigger capture.
-CAPTURE_AREA_THRESHOLD = 0.12
+CAPTURE_AREA_THRESHOLD = 0.035
 
 # Temporary YOLO loss tolerance.
 MAX_LOST_FRAMES = 15
@@ -71,10 +72,6 @@ MAX_LOST_FRAMES = 15
 # If final attack runs this long,
 # trigger capture anyway.
 MAX_ATTACK_TIME = 2.0
-
-# Keep driving briefly after attack starts, even if the
-# low camera makes the target box look large immediately.
-MIN_ATTACK_FORWARD_TIME = 0.25
 
 # Give chassis a moment to physically stop
 # before triggering SG90.
@@ -656,16 +653,6 @@ def draw_target(
 
     cv2.putText(
         frame,
-        f"CMD: {get_desired_command()}",
-        (20, 80),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
-        2
-    )
-
-    cv2.putText(
-        frame,
         "Q = EMERGENCY STOP",
         (
             20,
@@ -766,9 +753,6 @@ def main():
         lost_frames = 0
 
         attack_start_time = None
-        attack_lost_since = None
-        capture_range_seen = False
-        capture_area_ratio = None
 
         stop()
 
@@ -996,18 +980,11 @@ def main():
 
                             state = "ATTACK"
 
-                            # The first attack frame may already
-                            # exceed the capture area with a low camera.
-                            capture_range_seen = (
-                                area_ratio >= CAPTURE_AREA_THRESHOLD
+                            attack_start_time = (
+                                time.time()
                             )
-                            capture_area_ratio = (
-                                area_ratio if capture_range_seen else None
-                            )
-                            attack_lost_since = None
 
                             forward()
-                            attack_start_time = time.monotonic()
 
                         else:
 
@@ -1019,64 +996,71 @@ def main():
 
             elif state == "ATTACK":
 
-                # Commit forward while approaching the target.
+                # Commit forward.
                 forward()
 
-                now = time.monotonic()
+                # ----------------------------------------------
+                # TARGET STILL VISIBLE
+                # ----------------------------------------------
 
-                if target is None:
-                    if attack_lost_since is None:
-                        attack_lost_since = now
-                else:
-                    attack_lost_since = None
-                    area_ratio = target["area_ratio"]
+                if target is not None:
 
-                    if area_ratio >= CAPTURE_AREA_THRESHOLD:
-                        capture_range_seen = True
-                        capture_area_ratio = area_ratio
+                    area_ratio = (
+                        target["area_ratio"]
+                    )
 
-                attack_elapsed = (
-                    now - attack_start_time
-                )
+                    if (
+                        area_ratio
+                        >= CAPTURE_AREA_THRESHOLD
+                    ):
 
-                # A large box can cross the area threshold early.
-                # Finish a short forward approach before capture.
+                        print()
+
+                        print(
+                            "📍 CAPTURE RANGE REACHED"
+                        )
+
+                        print(
+                            f"area="
+                            f"{area_ratio:.3f}"
+                        )
+
+                        forward()
+                        send_command_once("F")
+
+                        time.sleep(FINAL_PUSH_TIME)
+
+                        stop_now()
+
+                        state = "CAPTURE"
+
+                # ----------------------------------------------
+                # ATTACK TIMEOUT
+                # ----------------------------------------------
+
                 if (
-                    capture_range_seen
-                    and attack_elapsed >= MIN_ATTACK_FORWARD_TIME
+                    state == "ATTACK"
+                    and
+                    attack_start_time is not None
+                    and
+                    time.time()
+                    - attack_start_time
+                    >= MAX_ATTACK_TIME
                 ):
 
                     print()
-                    print("📍 CAPTURE RANGE REACHED")
-                    print(f"area={capture_area_ratio:.3f}")
 
-                    # Send F now so the final push cannot finish
-                    # before the background sender refreshes it.
-                    send_command_once("F")
-                    time.sleep(FINAL_PUSH_TIME)
-                    stop_now()
+                    print(
+                        "⏱️ ATTACK TIMEOUT"
+                    )
 
-                    state = "CAPTURE"
-
-                elif (
-                    attack_lost_since is not None
-                    and now - attack_lost_since >= MIN_ATTACK_FORWARD_TIME
-                ):
-
-                    print()
-                    print("❌ TARGET LOST DURING ATTACK")
-                    stop_now()
-                    state = "SEARCH"
-                    lost_frames = 0
-
-                elif attack_elapsed >= MAX_ATTACK_TIME:
-
-                    print()
-                    print("⏱️ ATTACK TIMEOUT")
-                    print("Triggering capture.")
+                    print(
+                        "Triggering capture."
+                    )
 
                     state = "CAPTURE"
-                    stop_now()
+
+                    stop()
 
             # ==================================================
             # CAPTURE
