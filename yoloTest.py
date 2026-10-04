@@ -3,1219 +3,1289 @@ import time
 import threading
 import requests
 
+from pathlib import Path
 from ultralytics import YOLO
 
 
 # ============================================================
-# CONFIG
+# ESP32
 # ============================================================
 
-# ------------------------------------------------------------
-# ESP32
-# ------------------------------------------------------------
+ESP32 = "http://192.168.4.1"
 
-ESP32 = "http://172.20.10.3"
-
-# ESP32 has a 500 ms safety timeout.
-# We send the current motor command every 150 ms.
+# ESP32 motor watchdog = 500 ms.
+# Refresh current motor command every 150 ms.
 MOTOR_SEND_INTERVAL = 0.15
 
+MOTOR_HTTP_TIMEOUT = 0.3
 
-# ------------------------------------------------------------
-# YOLO target
-# ------------------------------------------------------------
+# /ready and /capture include servo movement on ESP32,
+# so give them enough time to finish and respond.
+SERVO_HTTP_TIMEOUT = 3
 
-# Fake cockroaches are currently detected as "bird"
+
+# ============================================================
+# CAMERA
+# ============================================================
+
+CAMERA_INDEX = 0
+
+
+# ============================================================
+# YOLO
+# ============================================================
+
+MODEL_PATH = Path(__file__).resolve().parent / "best-2.pt"
+
 TARGET_CLASS = "cockroach"
 
-
-# ------------------------------------------------------------
-# Steering zones
-# ------------------------------------------------------------
-
-LEFT_BOUNDARY = 0.40
-RIGHT_BOUNDARY = 0.60
+CONFIDENCE_THRESHOLD = 0.25
 
 
-# ------------------------------------------------------------
-# Distance proxy
-#
-# bbox area / whole frame area
-#
-# These values are TEMPORARY.
-# Recalibrate after mounting the final camera on the robot.
-# ------------------------------------------------------------
+# ============================================================
+# STEERING
+# ============================================================
 
-ATTACK_AREA_THRESHOLD = 0.08
-CAPTURE_AREA_THRESHOLD = 0.18
+# Target center < 40% of image width -> turn left
+# Target center > 60% -> turn right
+# Otherwise -> centered
+
+LEFT_BOUNDARY = 0.55
+RIGHT_BOUNDARY = 0.85
 
 
-# During normal CHASE:
-# how many consecutive frames can we lose the target
-# before giving up and searching again?
+# ============================================================
+# ATTACK / CAPTURE
+# ============================================================
 
+# Once centered and >= 8% of the frame:
+# begin final attack.
+ATTACK_AREA_THRESHOLD = 0.03
+
+# During attack, once >= 12% of frame:
+# trigger capture.
+CAPTURE_AREA_THRESHOLD = 0.035
+
+# Temporary YOLO loss tolerance.
 MAX_LOST_FRAMES = 15
 
-
-# Once ATTACK begins, we commit forward.
-# This prevents the robot from attacking forever if vision fails.
-
+# If final attack runs this long,
+# trigger capture anyway.
 MAX_ATTACK_TIME = 2.0
 
+# Give chassis a moment to physically stop
+# before triggering SG90.
+STOP_BEFORE_CAPTURE = 0.20
 
-# How long to wait for physical capture mechanism to finish
-
-CAPTURE_WAIT_TIME = 2.0
-
-
-# During VERIFY:
-# target must be missing for this many frames
-# before we consider capture successful.
-
-VERIFY_LOST_FRAMES = 10
+FINAL_PUSH_TIME = 0.10
 
 
 # ============================================================
-# MOTOR COMMUNICATION STATE
+# SHARED MOTOR STATE
 # ============================================================
-
-# X = stop
-# F = forward
-# L = left
-# R = right
-# B = backward
 
 desired_command = "X"
 
-motor_sender_running = True
-
-# Prevent simultaneous modification while sender reads command
 motor_lock = threading.Lock()
 
+motor_thread_running = False
+
 
 # ============================================================
-# ESP32 COMMUNICATION
+# MOTOR COMMUNICATION
 # ============================================================
 
-def set_motor_command(command):
-    """
-    Update the command that should continuously be sent
-    to the ESP32.
-
-    This does NOT perform HTTP itself.
-    The motor_sender thread handles networking.
-    """
-
+def set_desired_command(command):
     global desired_command
 
     with motor_lock:
         desired_command = command
 
 
+def get_desired_command():
+    with motor_lock:
+        return desired_command
+
+
 def send_command_once(command):
-    """
-    Send one HTTP motor command immediately.
-    Used mainly for emergency STOP.
-    """
-
     try:
-
         response = requests.get(
             f"{ESP32}/cmd",
             params={"d": command},
-            timeout=0.2
+            timeout=MOTOR_HTTP_TIMEOUT
         )
 
         return response.status_code == 200
 
-    except requests.RequestException:
+    except requests.RequestException as error:
+        print(
+            f"⚠️ ESP32 connection error: {error}"
+        )
 
         return False
 
 
 def motor_sender():
-    """
-    Runs independently from YOLO.
+    global motor_thread_running
 
-    Sends the latest desired motor command every 150 ms.
+    while motor_thread_running:
+        command = get_desired_command()
 
-    This is important because ESP32 automatically stops
-    the motors if it receives no command for 500 ms.
-    """
+        send_command_once(command)
 
-    global motor_sender_running
-
-    last_printed_error = 0
-
-    while motor_sender_running:
-
-        with motor_lock:
-            command = desired_command
-
-        try:
-
-            requests.get(
-                f"{ESP32}/cmd",
-                params={"d": command},
-                timeout=0.2
-            )
-
-        except requests.RequestException as error:
-
-            # Avoid flooding terminal with errors
-            current_time = time.time()
-
-            if current_time - last_printed_error > 2:
-
-                print(
-                    f"⚠️ ESP32 connection error: {error}"
-                )
-
-                last_printed_error = current_time
-
-        time.sleep(MOTOR_SEND_INTERVAL)
+        time.sleep(
+            MOTOR_SEND_INTERVAL
+        )
 
 
 # ============================================================
-# ROBOT ACTIONS
+# MOTOR ACTIONS
 # ============================================================
-
-def move_left():
-
-    set_motor_command("L")
-
-    return "LEFT"
-
-
-def move_right():
-
-    set_motor_command("R")
-
-    return "RIGHT"
-
-
-def move_forward():
-
-    set_motor_command("F")
-
-    return "FORWARD"
-
-
-def move_backward():
-
-    set_motor_command("B")
-
-    return "REVERSE"
-
 
 def stop():
+    set_desired_command("X")
+    return "X"
 
-    set_motor_command("X")
 
-    return "STOP"
+def forward():
+    # Send the first forward command without waiting for
+    # the background motor refresh.
+    changed = get_desired_command() != "F"
+    set_desired_command("F")
 
+    if changed:
+        send_command_once("F")
+
+    return "F"
+
+
+def backward():
+    set_desired_command("B")
+    return "B"
+
+
+def left():
+    set_desired_command("L")
+    return "L"
+
+
+def right():
+    set_desired_command("R")
+    return "R"
+
+
+def stop_now():
+    """
+    Stop immediately instead of waiting for the
+    motor sender thread.
+    """
+
+    stop()
+
+    send_command_once("X")
+
+
+# ============================================================
+# SERVO READY
+#
+# Called exactly once at the beginning.
+#
+# ESP32 /ready should:
+#
+#   rotate opposite direction
+#   -> 200 ms
+#   -> neutral STOP
+#
+# ============================================================
+
+# def initialize_capture_mechanism():
+#
+#     print()
+#     print("🔼 INITIALIZING CAPTURE MECHANISM")
+#
+#     try:
+#
+#         response = requests.get(
+#             f"{ESP32}/ready",
+#             timeout=SERVO_HTTP_TIMEOUT
+#         )
+#
+#         if response.status_code == 200:
+#
+#             print(
+#                 "✅ Capture mechanism READY"
+#             )
+#
+#             return True
+#
+#         print(
+#             f"❌ Ready returned HTTP "
+#             f"{response.status_code}"
+#         )
+#
+#         return False
+#
+#     except requests.RequestException as error:
+#
+#         print(
+#             f"❌ Ready command failed: {error}"
+#         )
+#
+#         return False
+
+
+# ============================================================
+# CAPTURE
+#
+# Python only calls /capture.
+#
+# ESP32 should:
+#
+#   capture direction
+#   -> 200 ms
+#   -> neutral STOP
+#
+# ============================================================
 
 def activate_capture():
-    """
-    Physical capture mechanism is not connected yet.
 
-    Later:
-        Python
-          ↓
-        ESP32
-          ↓
-        Servo
-          ↓
-        Trap closes
-    """
-
-    print("🪳 CAPTURE MECHANISM ACTIVATED")
-
-    return "CAPTURE"
-
-
-# ============================================================
-# TEST ESP32 CONNECTION BEFORE STARTING
-# ============================================================
-
-print()
-print("Testing ESP32 connection...")
-
-try:
-
-    response = requests.get(
-        f"{ESP32}/cmd",
-        params={"d": "X"},
-        timeout=1.0
-    )
-
-    if response.status_code == 200:
-
-        print(
-            f"ESP32 connected: {ESP32}"
-        )
-
-    else:
-
-        print(
-            f"⚠️ ESP32 returned HTTP {response.status_code}"
-        )
-
-except requests.RequestException as error:
-
-    print()
-    print("❌ CANNOT CONNECT TO ESP32")
-    print(f"Address: {ESP32}")
-    print(error)
     print()
     print(
-        "Make sure Mac and ESP32 are connected "
-        "to the same iPhone hotspot."
+        "🪳 CAPTURE MECHANISM ACTIVATED"
     )
 
-    raise SystemExit
+    try:
+
+        response = requests.get(
+            f"{ESP32}/capture",
+            timeout=SERVO_HTTP_TIMEOUT
+        )
+
+        if response.status_code == 200:
+
+            print(
+                "✅ ESP32 capture complete"
+            )
+
+            return True
+
+        print(
+            f"❌ Capture returned HTTP "
+            f"{response.status_code}"
+        )
+
+        return False
+
+    except requests.RequestException as error:
+
+        print(
+            f"❌ Capture command failed: {error}"
+        )
+
+        return False
+
+
+# ============================================================
+# TEST WEBCAM
+# ============================================================
+
+def test_webcam():
+
+    print("Testing webcam...")
+
+    cap = cv2.VideoCapture(
+        CAMERA_INDEX
+    )
+
+    if not cap.isOpened():
+
+        print(
+            "❌ Cannot open webcam"
+        )
+
+        return None
+
+    # Allow webcam to initialize.
+    time.sleep(0.5)
+
+    success, frame = cap.read()
+
+    if not success or frame is None:
+
+        print(
+            "❌ Failed to read webcam frame"
+        )
+
+        cap.release()
+
+        return None
+
+    height, width = frame.shape[:2]
+
+    print(
+        f"✅ Webcam connected "
+        f"({width}x{height})"
+    )
+
+    return cap
+
+
+# ============================================================
+# TEST ESP32
+# ============================================================
+
+def test_esp32():
+
+    print(
+        "Testing ESP32 connection..."
+    )
+
+    print(
+        "Make sure Mac is connected "
+        "to ROACH-HUNTER Wi-Fi."
+    )
+
+    try:
+
+        response = requests.get(
+            ESP32,
+            timeout=1.0
+        )
+
+        if response.status_code == 200:
+
+            print(
+                f"✅ ESP32 connected: "
+                f"{ESP32}"
+            )
+
+            return True
+
+        print(
+            f"❌ ESP32 returned HTTP "
+            f"{response.status_code}"
+        )
+
+        return False
+
+    except requests.RequestException as error:
+
+        print(
+            "❌ CANNOT CONNECT TO ESP32"
+        )
+
+        print(
+            f"Address: {ESP32}"
+        )
+
+        print(error)
+
+        return False
 
 
 # ============================================================
 # LOAD YOLO
 # ============================================================
 
-print()
-print("Loading YOLO...")
+def load_model():
 
-model = YOLO("best.pt")
+    print("Loading YOLO...")
 
-print("YOLO loaded")
+    if not MODEL_PATH.exists():
+
+        print(
+            f"❌ Model not found: "
+            f"{MODEL_PATH}"
+        )
+
+        return None
+
+    model = YOLO(
+        str(MODEL_PATH)
+    )
+
+    print(
+        "✅ YOLO loaded"
+    )
+
+    return model
 
 
 # ============================================================
-# OPEN CAMERA
+# TARGET EXTRACTION
 # ============================================================
 
-print()
-print("Opening camera...")
+def get_targets(
+    result,
+    frame_width,
+    frame_height
+):
 
-# Change to 1 if iPhone Continuity Camera is camera 1.
-# Use whichever index successfully opens your iPhone.
+    targets = []
 
-CAMERA_INDEX = 0
+    frame_area = (
+        frame_width *
+        frame_height
+    )
 
-cap = cv2.VideoCapture(CAMERA_INDEX)
+    if result.boxes is None:
+        return targets
+
+    for box in result.boxes:
+
+        confidence = float(
+            box.conf[0]
+        )
+
+        if (
+            confidence
+            < CONFIDENCE_THRESHOLD
+        ):
+            continue
+
+        class_id = int(
+            box.cls[0]
+        )
+
+        class_name = (
+            result.names[class_id]
+        )
+
+        if (
+            class_name.lower()
+            != TARGET_CLASS.lower()
+        ):
+            continue
+
+        x1, y1, x2, y2 = (
+            box.xyxy[0].tolist()
+        )
+
+        box_width = max(
+            0,
+            x2 - x1
+        )
+
+        box_height = max(
+            0,
+            y2 - y1
+        )
+
+        box_area = (
+            box_width *
+            box_height
+        )
+
+        area_ratio = (
+            box_area /
+            frame_area
+        )
+
+        center_x = (
+            x1 + x2
+        ) / 2
+
+        center_y = (
+            y1 + y2
+        ) / 2
+
+        targets.append(
+            {
+                "confidence": confidence,
+
+                "bbox": (
+                    x1,
+                    y1,
+                    x2,
+                    y2
+                ),
+
+                "center_x": center_x,
+
+                "center_y": center_y,
+
+                "area_ratio": area_ratio,
+            }
+        )
+
+    return targets
 
 
-if not cap.isOpened():
+# ============================================================
+# CHOOSE TARGET
+# ============================================================
 
-    raise RuntimeError(
-        f"Could not open camera {CAMERA_INDEX}"
+def choose_target(targets):
+
+    if not targets:
+        return None
+
+    # Choose largest bounding box.
+    # Usually the nearest cockroach.
+
+    return max(
+        targets,
+        key=lambda target:
+        target["area_ratio"]
     )
 
 
-print(
-    f"Camera {CAMERA_INDEX} opened"
-)
-
-# Give Continuity Camera / webcam time to connect
-time.sleep(3)
-
-
 # ============================================================
-# START MOTOR THREAD
+# VISUALIZATION
 # ============================================================
 
-motor_thread = threading.Thread(
-    target=motor_sender,
-    daemon=True
-)
+def draw_target(
+    frame,
+    target,
+    state
+):
 
-motor_thread.start()
+    height, width = frame.shape[:2]
 
-print("Motor sender started")
+    # --------------------------------------------------------
+    # STEERING BOUNDARIES
+    # --------------------------------------------------------
 
+    left_x = int(
+        width *
+        LEFT_BOUNDARY
+    )
 
-# ============================================================
-# STATE VARIABLES
-# ============================================================
+    right_x = int(
+        width *
+        RIGHT_BOUNDARY
+    )
 
-# State machine:
-#
-# SEARCH
-#   ↓
-# CHASE
-#   ↓
-# ATTACK
-#   ↓
-# CAPTURE
-#   ↓
-# VERIFY
-#
-# VERIFY success -> SEARCH
-# VERIFY failure -> CHASE
+    cv2.line(
+        frame,
+        (left_x, 0),
+        (left_x, height),
+        (255, 255, 255),
+        2
+    )
 
-state = "SEARCH"
+    cv2.line(
+        frame,
+        (right_x, 0),
+        (right_x, height),
+        (255, 255, 255),
+        2
+    )
 
-locked_target_id = None
+    # --------------------------------------------------------
+    # TARGET BOX
+    # --------------------------------------------------------
 
-lost_frames = 0
+    if target is not None:
 
-verify_lost_frames = 0
-
-attack_start_time = None
-
-capture_start_time = None
-
-
-# ============================================================
-# START
-# ============================================================
-
-print()
-print("==============================")
-print("      ROACH HUNTER")
-print("==============================")
-print()
-print("ESP32:", ESP32)
-print("Target class:", TARGET_CLASS)
-print()
-print("Press Q to EMERGENCY STOP")
-print()
-
-
-# Start safely stopped
-stop()
-
-
-# ============================================================
-# MAIN LOOP
-# ============================================================
-
-try:
-
-    while True:
-
-        # --------------------------------------------------------
-        # READ CAMERA
-        # --------------------------------------------------------
-
-        ret, frame = cap.read()
-
-        if not ret:
-
-            print("❌ Failed to read camera frame")
-
-            stop()
-
-            break
-
-
-        frame_height, frame_width = frame.shape[:2]
-
-        frame_area = (
-            frame_width * frame_height
+        x1, y1, x2, y2 = (
+            target["bbox"]
         )
 
+        x1 = int(x1)
+        y1 = int(y1)
+        x2 = int(x2)
+        y2 = int(y2)
 
-        left_boundary = (
-            frame_width * LEFT_BOUNDARY
+        center_x = int(
+            target["center_x"]
         )
 
-        right_boundary = (
-            frame_width * RIGHT_BOUNDARY
+        center_y = int(
+            target["center_y"]
         )
 
-
-        # Default display command
-        command = "SEARCH"
-
-
-        # ========================================================
-        # 1. YOLO + OBJECT TRACKING
-        # ========================================================
-
-        results = model.track(
+        cv2.rectangle(
             frame,
-            persist=True,
-            verbose=False
+            (x1, y1),
+            (x2, y2),
+            (255, 255, 255),
+            2
         )
 
-        result = results[0]
+        cv2.circle(
+            frame,
+            (
+                center_x,
+                center_y
+            ),
+            6,
+            (255, 255, 255),
+            -1
+        )
 
-        targets = []
+        text = (
+            f"{TARGET_CLASS} "
+            f"{target['confidence']:.2f} "
+            f"area="
+            f"{target['area_ratio']:.3f}"
+        )
 
-
-        # ========================================================
-        # 2. COLLECT ALL DETECTED TARGETS
-        # ========================================================
-
-        if result.boxes is not None:
-
-            for box in result.boxes:
-
-                # Tracker has not assigned ID yet
-                if box.id is None:
-                    continue
-
-
-                class_id = int(
-                    box.cls[0]
+        cv2.putText(
+            frame,
+            text,
+            (
+                x1,
+                max(
+                    25,
+                    y1 - 10
                 )
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
 
-                class_name = (
-                    model.names[class_id]
-                )
+    # --------------------------------------------------------
+    # STATE
+    # --------------------------------------------------------
 
+    cv2.putText(
+        frame,
+        f"STATE: {state}",
+        (20, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (255, 255, 255),
+        2
+    )
 
-                # Fake cockroach currently appears as bird
-                if class_name != TARGET_CLASS:
-                    continue
-
-
-                track_id = int(
-                    box.id[0]
-                )
-
-
-                x1, y1, x2, y2 = (
-                    box.xyxy[0].tolist()
-                )
-
-
-                width = x2 - x1
-
-                height = y2 - y1
-
-
-                area = width * height
-
-
-                # Relative size of target
-                area_ratio = (
-                    area / frame_area
-                )
-
-
-                targets.append({
-
-                    "id": track_id,
-
-                    "box": (
-                        x1,
-                        y1,
-                        x2,
-                        y2
-                    ),
-
-                    "area": area,
-
-                    "area_ratio": area_ratio
-
-                })
+    cv2.putText(
+        frame,
+        "Q = EMERGENCY STOP",
+        (
+            20,
+            height - 20
+        ),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2
+    )
 
 
-        # ========================================================
-        # 3. SEARCH
-        # ========================================================
+# ============================================================
+# MAIN
+# ============================================================
 
-        if state == "SEARCH":
+def main():
 
-            command = "SEARCH"
+    global motor_thread_running
 
-            # IMPORTANT:
-            # Do not retain previous movement while searching.
-            stop()
+    thread = None
 
+    # This guarantees /capture is triggered
+    # at most once per Python run.
+    capture_triggered = False
 
-            if targets:
+    # --------------------------------------------------------
+    # CAMERA
+    # --------------------------------------------------------
 
-                # Largest bbox ≈ nearest target
+    cap = test_webcam()
 
-                nearest = max(
-                    targets,
-                    key=lambda target:
-                        target["area"]
-                )
+    if cap is None:
+        return
 
+    # --------------------------------------------------------
+    # ESP32
+    # --------------------------------------------------------
 
-                locked_target_id = (
-                    nearest["id"]
-                )
+    if not test_esp32():
+        cap.release()
+        return
 
+    # Everything after ESP32 connection is wrapped
+    # in try/finally so the final capture rule applies
+    # even if something goes wrong.
 
-                lost_frames = 0
+    try:
 
-                verify_lost_frames = 0
+        # ====================================================
+        # STARTUP SERVO READY
+        # ====================================================
 
+        # print()
+        # print("Initializing capture mechanism...")
 
-                state = "CHASE"
+        # if not initialize_capture_mechanism():
+        #
+        #     print(
+        #         "❌ Cannot initialize "
+        #         "capture mechanism"
+        #     )
+        #
+        #     return
 
+        # ====================================================
+        # YOLO
+        # ====================================================
+
+        model = load_model()
+
+        if model is None:
+            return
+
+        # ====================================================
+        # MOTOR THREAD
+        # ====================================================
+
+        motor_thread_running = True
+
+        thread = threading.Thread(
+            target=motor_sender,
+            daemon=True
+        )
+
+        thread.start()
+
+        print(
+            "Motor sender started"
+        )
+
+        # ====================================================
+        # STATE
+        # ====================================================
+
+        state = "SEARCH"
+
+        lost_frames = 0
+
+        attack_start_time = None
+
+        stop()
+
+        print()
+        print(
+            "=============================="
+        )
+        print(
+            "ROACH HUNTER"
+        )
+        print(
+            "=============================="
+        )
+
+        print(
+            f"ESP32: {ESP32}"
+        )
+
+        print(
+            f"Target class: "
+            f"{TARGET_CLASS}"
+        )
+
+        print()
+
+        print(
+            "Startup servo: /ready"
+        )
+
+        print(
+            "Final servo: /capture"
+        )
+
+        print()
+
+        print(
+            "Press Q to EMERGENCY STOP"
+        )
+
+        print()
+
+        # ====================================================
+        # MAIN LOOP
+        # ====================================================
+
+        while True:
+
+            # ==================================================
+            # READ CAMERA
+            # ==================================================
+
+            success, frame = cap.read()
+
+            if (
+                not success
+                or
+                frame is None
+            ):
 
                 print(
-                    f"🎯 TARGET LOCKED: "
-                    f"ID {locked_target_id}"
+                    "❌ Failed to read "
+                    "webcam frame"
                 )
 
+                break
 
-        # ========================================================
-        # FIND LOCKED TARGET
-        # ========================================================
+            height, width = (
+                frame.shape[:2]
+            )
 
-        locked_target = None
+            # ==================================================
+            # YOLO
+            # ==================================================
 
+            results = model(
+                frame,
+                verbose=False
+            )
 
-        if locked_target_id is not None:
+            result = results[0]
 
-            for target in targets:
+            targets = get_targets(
+                result,
+                width,
+                height
+            )
 
-                if (
-                    target["id"]
-                    == locked_target_id
-                ):
+            target = choose_target(
+                targets
+            )
 
-                    locked_target = target
+            # ==================================================
+            # SEARCH
+            # ==================================================
 
-                    break
-
-
-        # ========================================================
-        # 4. CHASE
-        # ========================================================
-
-        if state == "CHASE":
-
-            # ----------------------------------------------------
-            # TARGET VISIBLE
-            # ----------------------------------------------------
-
-            if locked_target is not None:
-
-                lost_frames = 0
-
-
-                x1, y1, x2, y2 = (
-                    locked_target["box"]
-                )
-
-
-                target_x = (
-                    (x1 + x2) / 2
-                )
-
-                target_y = (
-                    (y1 + y2) / 2
-                )
-
-
-                area_ratio = (
-                    locked_target[
-                        "area_ratio"
-                    ]
-                )
-
-
-                centered = (
-
-                    left_boundary
-                    <= target_x
-                    <= right_boundary
-
-                )
-
-
-                # =================================================
-                # ATTACK CONDITION
-                # =================================================
-
-                if (
-                    centered
-                    and
-                    area_ratio
-                    >= ATTACK_AREA_THRESHOLD
-                ):
-
-                    state = "ATTACK"
-
-                    attack_start_time = (
-                        time.time()
-                    )
-
-                    command = (
-                        move_forward()
-                    )
-
-
-                    print(
-                        f"⚔️ ATTACK STARTED "
-                        f"| ID {locked_target_id} "
-                        f"| area={area_ratio:.3f}"
-                    )
-
-
-                # =================================================
-                # NORMAL STEERING
-                # =================================================
-
-                elif (
-                    target_x
-                    < left_boundary
-                ):
-
-                    command = (
-                        move_left()
-                    )
-
-
-                elif (
-                    target_x
-                    > right_boundary
-                ):
-
-                    command = (
-                        move_right()
-                    )
-
-
-                else:
-
-                    command = (
-                        move_forward()
-                    )
-
-
-            # ----------------------------------------------------
-            # TARGET LOST DURING CHASE
-            # ----------------------------------------------------
-
-            else:
-
-                lost_frames += 1
-
-                command = "TARGET LOST"
-
-                # IMPORTANT SAFETY CHANGE:
-                # Stop immediately while vision is uncertain.
+            if state == "SEARCH":
 
                 stop()
 
+                if target is not None:
 
-                if (
-                    lost_frames
-                    > MAX_LOST_FRAMES
-                ):
+                    print()
 
                     print(
-                        f"❌ TARGET "
-                        f"{locked_target_id} "
-                        f"LOST"
+                        "🎯 TARGET LOCKED"
                     )
-
-
-                    locked_target_id = None
-
-                    lost_frames = 0
-
-                    state = "SEARCH"
-
-
-        # ========================================================
-        # 5. ATTACK
-        #
-        # Once ATTACK begins:
-        #
-        # - commit forward
-        # - ignore other cockroaches
-        # - do NOT reacquire
-        # ========================================================
-
-        elif state == "ATTACK":
-
-            command = (
-                move_forward()
-            )
-
-
-            # ----------------------------------------------------
-            # TARGET STILL VISIBLE
-            # ----------------------------------------------------
-
-            if locked_target is not None:
-
-                area_ratio = (
-                    locked_target[
-                        "area_ratio"
-                    ]
-                )
-
-
-                # =================================================
-                # CAPTURE RANGE
-                # =================================================
-
-                if (
-                    area_ratio
-                    >= CAPTURE_AREA_THRESHOLD
-                ):
-
-                    state = "CAPTURE"
-
-                    command = stop()
-
 
                     print(
-                        f"🪳 CAPTURE RANGE "
-                        f"| ID {locked_target_id} "
-                        f"| area={area_ratio:.3f}"
+                        f"confidence="
+                        f"{target['confidence']:.2f}"
                     )
-
-
-            # ----------------------------------------------------
-            # ATTACK TIMEOUT
-            #
-            # Target may disappear when extremely close.
-            # ----------------------------------------------------
-
-            if (
-                attack_start_time
-                is not None
-
-                and
-
-                time.time()
-                - attack_start_time
-                >= MAX_ATTACK_TIME
-            ):
-
-                state = "CAPTURE"
-
-                command = stop()
-
-
-                print(
-                    "🪳 ATTACK COMMIT COMPLETE"
-                )
-
-
-        # ========================================================
-        # 6. CAPTURE
-        # ========================================================
-
-        elif state == "CAPTURE":
-
-            command = stop()
-
-
-            activate_capture()
-
-
-            capture_start_time = (
-                time.time()
-            )
-
-
-            verify_lost_frames = 0
-
-
-            state = "VERIFY"
-
-
-        # ========================================================
-        # 7. VERIFY
-        # ========================================================
-
-        elif state == "VERIFY":
-
-            command = stop()
-
-
-            if (
-                capture_start_time
-                is not None
-
-                and
-
-                time.time()
-                - capture_start_time
-                >= CAPTURE_WAIT_TIME
-            ):
-
-
-                # =================================================
-                # CASE A:
-                #
-                # Original target still visible.
-                # Capture probably failed.
-                # =================================================
-
-                if locked_target is not None:
 
                     print(
-                        f"⚠️ TARGET "
-                        f"{locked_target_id} "
-                        f"STILL VISIBLE"
+                        f"area="
+                        f"{target['area_ratio']:.3f}"
                     )
-
-
-                    print(
-                        "🔁 CAPTURE FAILED — "
-                        "REATTACK"
-                    )
-
 
                     state = "CHASE"
 
-                    attack_start_time = None
-
-                    capture_start_time = None
-
                     lost_frames = 0
 
-                    verify_lost_frames = 0
+            # ==================================================
+            # CHASE
+            # ==================================================
 
+            elif state == "CHASE":
 
-                # =================================================
-                # CASE B:
-                #
-                # Original target not visible.
-                # Require several missing frames.
-                # =================================================
+                # ----------------------------------------------
+                # TARGET TEMPORARILY LOST
+                # ----------------------------------------------
 
-                else:
+                if target is None:
 
-                    verify_lost_frames += 1
+                    lost_frames += 1
 
-                    command = "VERIFYING"
-
+                    # IMPORTANT:
+                    # For short YOLO detection loss,
+                    # keep the previous motor command.
+                    #
+                    # Example:
+                    # previously F -> keep F
+                    # previously L -> keep L
+                    # previously R -> keep R
 
                     if (
-                        verify_lost_frames
-                        >= VERIFY_LOST_FRAMES
+                        lost_frames
+                        > MAX_LOST_FRAMES
                     ):
 
-                        print(
-                            f"✅ TARGET "
-                            f"{locked_target_id} "
-                            f"CAPTURED"
-                        )
-
+                        print()
 
                         print(
-                            "🔎 SEARCHING FOR "
-                            "NEXT TARGET"
+                            "❌ TARGET LOST"
                         )
-
-
-                        locked_target_id = None
-
-                        lost_frames = 0
-
-                        verify_lost_frames = 0
-
-                        attack_start_time = None
-
-                        capture_start_time = None
-
-
-                        state = "SEARCH"
-
-                        command = "SEARCH"
 
                         stop()
 
+                        state = "SEARCH"
 
-        # ========================================================
-        # 8. VISUALIZATION
-        # ========================================================
+                        lost_frames = 0
 
+                # ----------------------------------------------
+                # TARGET VISIBLE
+                # ----------------------------------------------
 
-        # --------------------------------------------------------
-        # Steering zone boundaries
-        # --------------------------------------------------------
+                else:
 
-        cv2.line(
-            frame,
-            (
-                int(left_boundary),
-                0
-            ),
-            (
-                int(left_boundary),
-                frame_height
-            ),
-            (255, 0, 0),
-            2
-        )
+                    lost_frames = 0
 
-
-        cv2.line(
-            frame,
-            (
-                int(right_boundary),
-                0
-            ),
-            (
-                int(right_boundary),
-                frame_height
-            ),
-            (255, 0, 0),
-            2
-        )
-
-
-        # --------------------------------------------------------
-        # Draw every detected cockroach
-        # --------------------------------------------------------
-
-        for target in targets:
-
-            x1, y1, x2, y2 = (
-                target["box"]
-            )
-
-            target_id = (
-                target["id"]
-            )
-
-            area_ratio = (
-                target["area_ratio"]
-            )
-
-
-            if (
-                target_id
-                == locked_target_id
-            ):
-
-                color = (
-                    0,
-                    255,
-                    0
-                )
-
-                thickness = 4
-
-            else:
-
-                color = (
-                    150,
-                    150,
-                    150
-                )
-
-                thickness = 2
-
-
-            cv2.rectangle(
-                frame,
-                (
-                    int(x1),
-                    int(y1)
-                ),
-                (
-                    int(x2),
-                    int(y2)
-                ),
-                color,
-                thickness
-            )
-
-
-            cv2.putText(
-                frame,
-                f"ID {target_id} "
-                f"area={area_ratio:.3f}",
-                (
-                    int(x1),
-                    max(
-                        25,
-                        int(y1) - 10
+                    center_ratio = (
+                        target["center_x"]
+                        /
+                        width
                     )
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2
-            )
 
+                    area_ratio = (
+                        target["area_ratio"]
+                    )
 
-            # Draw center of locked target
+                    # ------------------------------------------
+                    # TARGET LEFT
+                    # ------------------------------------------
 
-            if (
-                target_id
-                == locked_target_id
-            ):
+                    if (
+                        center_ratio
+                        < LEFT_BOUNDARY
+                    ):
 
-                target_x = (
-                    (x1 + x2) / 2
+                        left()
+
+                    # ------------------------------------------
+                    # TARGET RIGHT
+                    # ------------------------------------------
+
+                    elif (
+                        center_ratio
+                        > RIGHT_BOUNDARY
+                    ):
+
+                        right()
+
+                    # ------------------------------------------
+                    # TARGET CENTERED
+                    # ------------------------------------------
+
+                    else:
+
+                        # Close enough to start final attack.
+
+                        if (
+                            area_ratio
+                            >= ATTACK_AREA_THRESHOLD
+                        ):
+
+                            print()
+
+                            print(
+                                "⚔️ ATTACK STARTED"
+                            )
+
+                            print(
+                                f"area="
+                                f"{area_ratio:.3f}"
+                            )
+
+                            state = "ATTACK"
+
+                            attack_start_time = (
+                                time.time()
+                            )
+
+                            forward()
+
+                        else:
+
+                            forward()
+
+            # ==================================================
+            # ATTACK
+            # ==================================================
+
+            elif state == "ATTACK":
+
+                # Commit forward.
+                forward()
+
+                # ----------------------------------------------
+                # TARGET STILL VISIBLE
+                # ----------------------------------------------
+
+                if target is not None:
+
+                    area_ratio = (
+                        target["area_ratio"]
+                    )
+
+                    if (
+                        area_ratio
+                        >= CAPTURE_AREA_THRESHOLD
+                    ):
+
+                        print()
+
+                        print(
+                            "📍 CAPTURE RANGE REACHED"
+                        )
+
+                        print(
+                            f"area="
+                            f"{area_ratio:.3f}"
+                        )
+
+                        forward()
+                        send_command_once("F")
+
+                        time.sleep(FINAL_PUSH_TIME)
+
+                        stop_now()
+
+                        state = "CAPTURE"
+
+                # ----------------------------------------------
+                # ATTACK TIMEOUT
+                # ----------------------------------------------
+
+                if (
+                    state == "ATTACK"
+                    and
+                    attack_start_time is not None
+                    and
+                    time.time()
+                    - attack_start_time
+                    >= MAX_ATTACK_TIME
+                ):
+
+                    print()
+
+                    print(
+                        "⏱️ ATTACK TIMEOUT"
+                    )
+
+                    print(
+                        "Triggering capture."
+                    )
+
+                    state = "CAPTURE"
+
+                    stop()
+
+            # ==================================================
+            # CAPTURE
+            # ==================================================
+
+            elif state == "CAPTURE":
+
+                # ----------------------------------------------
+                # STOP ROBOT
+                # ----------------------------------------------
+
+                # First tell the shared motor state to STOP.
+                stop()
+
+                # Stop background motor sender.
+                #
+                # This prevents /cmd?d=X requests from being
+                # sent while ESP32 is busy handling /capture.
+                motor_thread_running = False
+
+                # Wait for motor sender thread to finish.
+                if (
+                    thread is not None
+                    and
+                    thread.is_alive()
+                ):
+
+                    thread.join(
+                        timeout=1.0
+                    )
+
+                # Send one final STOP command after the
+                # background sender has finished.
+                send_command_once("X")
+
+                print()
+
+                print(
+                    "🛑 ROBOT STOPPED"
                 )
 
-                target_y = (
-                    (y1 + y2) / 2
+                # Let chassis physically settle.
+                time.sleep(
+                    STOP_BEFORE_CAPTURE
                 )
 
+                # ----------------------------------------------
+                # IMPORTANT:
+                #
+                # Mark BEFORE HTTP request.
+                #
+                # Even if response times out after ESP32
+                # already moved the servo, finally will NOT
+                # trigger it again.
+                # ----------------------------------------------
 
-                cv2.circle(
-                    frame,
-                    (
-                        int(target_x),
-                        int(target_y)
-                    ),
-                    8,
-                    (0, 0, 255),
-                    -1
-                )
+                capture_triggered = True
 
+                success = activate_capture()
 
-        # ========================================================
-        # STATE DISPLAY
-        # ========================================================
+                if success:
 
-        cv2.putText(
-            frame,
-            f"STATE: {state}",
-            (40, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.2,
-            (0, 0, 255),
-            3
-        )
+                    print()
 
+                    print(
+                        "🪳 CAPTURE COMPLETE"
+                    )
 
-        # ========================================================
-        # COMMAND DISPLAY
-        # ========================================================
+                    print(
+                        "🏁 ROACH HUNTER FINISHED"
+                    )
 
-        cv2.putText(
-            frame,
-            f"CMD: {command}",
-            (40, 110),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (0, 0, 255),
-            2
-        )
+                else:
 
+                    print()
 
-        # ========================================================
-        # LOCKED TARGET DISPLAY
-        # ========================================================
+                    print(
+                        "❌ CAPTURE REQUEST FAILED"
+                    )
 
-        if locked_target_id is not None:
+                    print(
+                        "Not retrying servo "
+                        "to avoid double movement."
+                    )
 
-            cv2.putText(
+                # Capture occurs once.
+                # Program ends.
+                break
+
+            # ==================================================
+            # DISPLAY
+            # ==================================================
+
+            draw_target(
                 frame,
-                f"TARGET: {locked_target_id}",
-                (40, 155),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2
+                target,
+                state
             )
 
-
-        # ========================================================
-        # ACTUAL MOTOR COMMAND DISPLAY
-        # ========================================================
-
-        with motor_lock:
-
-            actual_motor_command = (
-                desired_command
+            cv2.imshow(
+                "ROACH HUNTER",
+                frame
             )
 
+            # ==================================================
+            # EMERGENCY STOP
+            # ==================================================
 
-        cv2.putText(
-            frame,
-            f"MOTOR: {actual_motor_command}",
-            (40, 200),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 255),
-            2
+            key = (
+                cv2.waitKey(1)
+                &
+                0xFF
+            )
+
+            if key == ord("q"):
+
+                print()
+
+                print(
+                    "🛑 EMERGENCY STOP"
+                )
+
+                stop_now()
+
+                break
+
+    except KeyboardInterrupt:
+
+        print()
+
+        print(
+            "🛑 CTRL+C"
         )
 
+    finally:
 
-        # ========================================================
-        # SHOW WINDOW
-        # ========================================================
+        # ======================================================
+        # ALWAYS STOP WHEELS FIRST
+        # ======================================================
 
-        cv2.imshow(
-            "ROACH HUNTER",
-            frame
+        print()
+
+        print(
+            "Stopping motors..."
         )
 
+        stop_now()
 
-        # ========================================================
-        # EMERGENCY STOP
-        # ========================================================
+        motor_thread_running = False
 
         if (
-            cv2.waitKey(1)
-            & 0xFF
-            == ord("q")
+            thread is not None
+            and
+            thread.is_alive()
         ):
 
+            thread.join(
+                timeout=1.0
+            )
+
+        # ======================================================
+        # GUARANTEE FINAL SERVO MOVEMENT EXACTLY ONCE
+        #
+        # Case 1:
+        # Normal YOLO capture already happened
+        # -> capture_triggered == True
+        # -> DO NOTHING
+        #
+        # Case 2:
+        # Q / Ctrl+C / camera failure / other exit
+        # -> capture_triggered == False
+        # -> call /capture ONCE
+        # ======================================================
+
+        if not capture_triggered:
+
             print()
-            print("🛑 EMERGENCY STOP")
 
-            stop()
+            print(
+                "⚠️ Program ending without "
+                "previous capture."
+            )
 
-            send_command_once("X")
+            print(
+                "Triggering final servo "
+                "movement once."
+            )
 
-            break
+            # Set BEFORE HTTP request.
+            # Never retry this movement.
+            capture_triggered = True
+
+            activate_capture()
+
+        else:
+
+            print()
+
+            print(
+                "✅ Capture servo already triggered."
+            )
+
+            print(
+                "Skipping final servo movement "
+                "to prevent double capture."
+            )
+
+        # ======================================================
+        # CAMERA CLEANUP
+        # ======================================================
+
+        cap.release()
+
+        cv2.destroyAllWindows()
+
+        print()
+
+        print(
+            "ROACH HUNTER stopped"
+        )
 
 
 # ============================================================
-# HANDLE CTRL+C
+# RUN
 # ============================================================
 
-except KeyboardInterrupt:
-
-    print()
-    print("🛑 CTRL+C — EMERGENCY STOP")
-
-    stop()
-
-    send_command_once("X")
-
-
-# ============================================================
-# CLEANUP
-# ============================================================
-
-finally:
-
-    print()
-    print("Stopping motors...")
-
-
-    # Tell sender thread to send STOP
-
-    stop()
-
-
-    # Send STOP immediately as extra safety
-
-    send_command_once("X")
-
-
-    # Stop background motor sender
-
-    motor_sender_running = False
-
-
-    # Give thread a moment to exit
-
-    time.sleep(0.2)
-
-
-    # Send STOP once more
-
-    send_command_once("X")
-
-
-    # Release camera
-
-    cap.release()
-
-    cv2.destroyAllWindows()
-
-
-    print("ROACH HUNTER stopped")
+if __name__ == "__main__":
+    main()
