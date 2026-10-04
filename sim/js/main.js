@@ -1,5 +1,5 @@
 // Entry point: builds the scene, wires vision -> controller -> motors ->
-// render exactly as docs/movement-algorithm.md's pipeline diagram describes,
+// render the simulated pursuit pipeline,
 // and drives the animation loop.
 
 import { clamp, norm, dist, resolveObstacles } from './utils.js';
@@ -133,8 +133,6 @@ function boot() {
   const chatLogEl = document.getElementById('chatLog');
   const chatForm = document.getElementById('chatForm');
   const chatInput = document.getElementById('chatInput');
-  const chatSendBtn = document.getElementById('chatSendBtn');
-  const agentBadge = document.getElementById('agentBadge');
 
   const WHO_LABEL = { user: 'YOU', robot: 'ROBOT' };
   function postChatMessage(who, text, imageDataUrl) {
@@ -165,77 +163,14 @@ function boot() {
     return off.toDataURL('image/jpeg', 0.75);
   }
 
-  // A real product doesn't just go silent for the ~1-2s the agent call
-  // takes -- show that it's working, and don't let a second submit race it.
-  function showTyping() {
-    const div = postChatMessage('robot', '思考中...');
-    div.classList.add('typing');
-    return () => div.remove();
-  }
-  function setChatBusy(busy) {
-    chatInput.disabled = busy;
-    chatSendBtn.disabled = busy;
-    if (!busy) chatInput.focus();
-  }
-
-  // At the exact moment a tracked target is lost, grab a still of the
-  // onboard cam and have the agent's LLM narrate what happened -- grounded
-  // in the actual sim facts (location, the roach's real behavior state, its
-  // flee target if any), not a canned template every time.
-  async function handleTargetLost(targetId, simTime) {
+  // Record the lost location and report it locally with the camera snapshot.
+  function handleTargetLost(targetId, simTime) {
     const place = nearestLocation(state.robot.x, state.robot.z);
-    const snapshot = captureCamSnapshot();
     const roach = state.roaches.find((r) => r.id === targetId);
-    const behavior = roach ? roach.state : null;
-    const fleeTo = roach && roach.state === 'fleeing' && roach.fleeTarget ? roach.fleeTarget.name : null;
-    // Prefer the roach's own true position (still tracked internally even
-    // though out of camera view) over the robot's -- for the heatmap we
-    // care about where roaches tend to vanish, not where the robot stood.
     state.lostPoints.push(roach ? { x: roach.x, z: roach.z } : { x: state.robot.x, z: state.robot.z });
-
-    const div = postRobotMessage(formatClock(simTime) + '，剛剛在' + place.zh + '附近跟丟了，正在分析畫面...', snapshot);
-
-    try {
-      const res = await fetch('http://localhost:8001/describe_loss', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target_id: targetId,
-          location_name: place.name,
-          location_zh: place.zh,
-          sim_time: formatClock(simTime),
-          roach_behavior: behavior,
-          flee_target: fleeTo,
-        }),
-      });
-      if (!res.ok) throw new Error('bad status ' + res.status);
-      const data = await res.json();
-      div.querySelector('.txt').textContent = formatClock(simTime) + '，' + data.description;
-    } catch (err) {
-      div.querySelector('.txt').textContent = formatClock(simTime) + '，剛剛在' + place.zh + '附近跟丟了，正在找。';
-    }
+    postRobotMessage(formatClock(simTime) + '，剛剛在' + place.zh + '附近跟丟了，正在找。', captureCamSnapshot());
   }
 
-  // Lightweight liveness check -- GET the agent's own port with no business
-  // logic involved (a 404 still proves the process is up; only a refused/
-  // failed connection means it isn't), polled periodically so the badge
-  // reflects reality instead of only updating after someone sends a tip.
-  async function checkAgentHealth() {
-    try {
-      const res = await fetch('http://localhost:8001/health', { method: 'GET' });
-      if (!res.ok) throw new Error('bad status ' + res.status);
-      agentBadge.textContent = '● agent connected';
-      agentBadge.className = 'badge agent-ok';
-    } catch (err) {
-      agentBadge.textContent = '● agent offline (local fallback)';
-      agentBadge.className = 'badge agent-off';
-    }
-    setTimeout(checkAgentHealth, 10000);
-  }
-
-  // Shared by the chat box (typed, already-parsed `loc`) and the ASI:One
-  // bridge polling below (a tip an external agent already parsed for us) --
-  // either way, a real location report should actually dispatch the robot.
   function applyLocationReport(loc) {
     if (fsm.reportSighting(loc.x, loc.z)) {
       telemetry.log('TIP RECEIVED · heading to ' + loc.name, '', state.simTime);
@@ -246,70 +181,21 @@ function boot() {
     }
   }
 
-  // The chat box talks to the real roach_tip_agent.py (ASI:One Agent
-  // Challenge entry) directly over its local REST endpoint, not a copy of
-  // the parsing logic in this file -- that agent does the actual
-  // understanding (ASI:One's LLM, or its own keyword fallback) and hands
-  // back the parsed (x, z) for us to dispatch. Falls back to local keyword
-  // matching only if the agent process isn't reachable, so the chat box
-  // still works for a quick test without it running.
-  chatForm.addEventListener('submit', async (e) => {
+  // Recognize room landmarks locally; dispatch the simulated robot without a backend.
+  chatForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const text = chatInput.value.trim();
     if (!text) return;
     postChatMessage('user', text);
     chatInput.value = '';
-    setChatBusy(true);
-    const clearTyping = showTyping();
-
-    try {
-      const res = await fetch('http://localhost:8001/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error('agent returned ' + res.status);
-      const data = await res.json();
-      clearTyping();
-      postChatMessage('robot', data.reply);
-      if (typeof data.x === 'number' && typeof data.z === 'number') {
-        if (fsm.reportSighting(data.x, data.z)) {
-          telemetry.log('TIP RECEIVED · heading to ' + data.name, '', state.simTime);
-          startPatrol();
-        }
-      }
-    } catch (err) {
-      clearTyping();
-      const loc = parseLocation(text);
-      if (!loc) {
-        postRobotMessage('（找不到 ASI 代理人，用本地關鍵字比對：）沒聽懂是哪裡耶，可以講清楚一點嗎？像是床、床頭櫃、衣櫃、書桌、垃圾桶、或窗戶附近。');
-        return;
-      }
-      applyLocationReport(loc);
-    } finally {
-      setChatBusy(false);
+    const loc = parseLocation(text);
+    if (!loc) {
+      postRobotMessage('沒聽懂是哪裡耶，可以講清楚一點嗎？像是床、床頭櫃、衣櫃、書桌、垃圾桶、或窗戶附近。');
+      return;
     }
+    applyLocationReport(loc);
+    chatInput.focus();
   });
-
-  // ASI:One bridge: a separate Python agent (../agent/roach_tip_agent.py,
-  // registered on Agentverse for the MHacks ASI:One Agent Challenge) parses
-  // a chat message sent through ASI:One and POSTs the location to
-  // serve_nocache.py's /api/report. We have no backend of our own to push
-  // to us, so just poll for it.
-  async function pollForAgentTip() {
-    try {
-      const res = await fetch('/api/poll', { cache: 'no-store' });
-      const tip = await res.json();
-      if (tip && typeof tip.x === 'number' && typeof tip.z === 'number') {
-        postChatMessage('robot', (tip.zh || tip.name) + '附近出現蟑螂');
-        applyLocationReport(tip);
-      }
-    } catch (e) {
-      // Bridge endpoint unreachable (serve_nocache.py not running some other
-      // way, or just a hiccup) -- silently retry next tick.
-    }
-    setTimeout(pollForAgentTip, 1500);
-  }
 
   // ---- telemetry / log / FSM ----
   const telemetry = bindTelemetry();
@@ -450,33 +336,13 @@ function boot() {
       if (!wasFleeing) victim.startle();
     }
 
-    describeCaptureOutcome(place, s.simTime, success, wasFleeing);
+    describeCaptureOutcome(place, s.simTime, success);
   }
 
-  // Same pattern as handleTargetLost: real sim facts (location, outcome,
-  // whether the target was fleeing) sent to the agent's LLM for a grounded,
-  // vivid narration instead of a fixed template every time.
-  async function describeCaptureOutcome(place, simTime, success, wasFleeing) {
-    const div = postRobotMessage(formatClock(simTime) + '，' + (success ? '抓到了' : '差一點點') + '，正在確認狀況...');
-    try {
-      const res = await fetch('http://localhost:8001/describe_capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          location_name: place.name,
-          location_zh: place.zh,
-          sim_time: formatClock(simTime),
-          success,
-          was_fleeing: wasFleeing,
-        }),
-      });
-      if (!res.ok) throw new Error('bad status ' + res.status);
-      const data = await res.json();
-      div.querySelector('.txt').textContent = formatClock(simTime) + '，' + data.description;
-    } catch (err) {
-      div.querySelector('.txt').textContent = formatClock(simTime) + '，在' + place.zh + '附近'
-        + (success ? '抓到了！蟑螂處理掉了。' : '差一點點，還是讓牠跑掉了。');
-    }
+  // Describe capture results directly from the simulation state.
+  function describeCaptureOutcome(place, simTime, success) {
+    postRobotMessage(formatClock(simTime) + '，在' + place.zh + '附近'
+      + (success ? '抓到了！蟑螂處理掉了。' : '差一點點，還是讓牠跑掉了。'));
   }
 
   // Roach behavior (foraging, hiding, fleeing) -- runs every frame regardless
@@ -614,6 +480,4 @@ function boot() {
   reset();
   state.last = performance.now();
   requestAnimationFrame(frame);
-  pollForAgentTip();
-  checkAgentHealth();
 }

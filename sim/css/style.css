@@ -58,8 +58,6 @@ body{
 
 .log-wrap{flex:1 1 300px;background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;max-height:206px;min-width:0;box-shadow:0 1px 2px rgba(16,24,40,.04)}
 .log-head{display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;padding:7px 11px;font-size:11px;letter-spacing:.04em;font-weight:600;color:var(--text-dim);border-bottom:1px solid var(--border);text-transform:uppercase}
-.badge.agent-ok{color:var(--catch)}
-.badge.agent-off{color:var(--amber)}
 .chat-input:disabled,.chat-input-row .btn:disabled{opacity:.55;cursor:default}
 .chat-msg .ts{font-size:9px;color:var(--text-faint);font-weight:400;margin-left:5px}
 .chat-msg.typing .txt{color:var(--text-faint);font-style:italic}

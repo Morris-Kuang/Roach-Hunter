@@ -1,8 +1,4 @@
-// Tip-line "NLP": local keyword matching against REPORTABLE_LOCATIONS, no
-// API key / network call / LLM. Deliberately simple -- it only recognizes a
-// fixed vocabulary of room landmarks, it does not understand arbitrary
-// phrasing -- but it's free, zero-latency, and works fully offline, matching
-// this project's "immune to the venue" demo philosophy (see proposal.md).
+// Local keyword matching against the configured room landmarks.
 
 import { REPORTABLE_LOCATIONS } from './constants.js';
 
